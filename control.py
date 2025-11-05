@@ -1,6 +1,7 @@
 import time
 import sys
 import os
+import threading
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR and SCRIPT_DIR not in sys.path:
@@ -65,6 +66,62 @@ def move_motor_simple(h, dir_pin, step_pin, steps, direction, delay):
         lgpio.gpio_write(h, step_pin, 0)
         time.sleep(delay)
 
+def move_motor_thread(h, motor_info, steps, direction, delay):
+    """모터를 별도 스레드에서 실행하는 함수"""
+    try:
+        enable_motor(h, motor_info['ena_pin'], True)
+        time.sleep(0.01)  # 모터 활성화 대기
+        
+        move_motor_simple(
+            h,
+            motor_info['dir_pin'],
+            motor_info['step_pin'],
+            steps,
+            direction,
+            delay
+        )
+    except Exception as e:
+        print(f"[ERROR] {motor_info['name']} error: {e}")
+    finally:
+        enable_motor(h, motor_info['ena_pin'], False)
+
+def move_all_motors_sync(h, motors, steps, direction, delay=DEFAULT_DELAY):
+    """
+    모든 모터를 동시에 작동시킴
+    
+    Args:
+        h: lgpio 핸들
+        motors: 모터 정보 딕셔너리
+        steps: 스텝 수
+        direction: 방향 (0=정방향, 1=역방향)
+        delay: 스텝 간 딜레이
+    """
+    dir_str = "forward" if direction == 0 else "backward"
+    print(f"\n[INFO] All motors starting: {dir_str}, steps={steps}")
+    print(f"[INFO] Estimated time: {steps * delay * 2:.2f}s")
+    
+    # 각 모터를 별도 스레드에서 실행
+    threads = []
+    for motor_key, motor_info in motors.items():
+        thread = threading.Thread(
+            target=move_motor_thread,
+            args=(h, motor_info, steps, direction, delay),
+            name=f"Motor-{motor_key}"
+        )
+        threads.append(thread)
+    
+    # 모든 스레드 시작
+    start_time = time.time()
+    for thread in threads:
+        thread.start()
+    
+    # 모든 스레드 완료 대기
+    for thread in threads:
+        thread.join()
+    
+    elapsed_time = time.time() - start_time
+    print(f"[INFO] All motors completed in {elapsed_time:.2f}s\n")
+
 # -------------------- Main --------------------
 def main():
     if lgpio is None:
@@ -113,6 +170,7 @@ def main():
         print("  M1 f/b [steps]  -> Control Motor 1")
         print("  M2 f/b [steps]  -> Control Motor 2")
         print("  M3 f/b [steps]  -> Control Motor 3")
+        print("  ALL f/b [steps] -> All motors simultaneously")
         print("  q               -> Quit")
         print("\nParameters:")
         print("  f/b     : f=forward, b=backward")
@@ -123,6 +181,8 @@ def main():
         print("  M1 f       -> Motor1 forward, default steps")
         print("  M2 b 1000  -> Motor2 backward, 1000 steps")
         print("  M3 f 500   -> Motor3 forward, 500 steps")
+        print("  ALL f 180  -> All motors forward 180 steps (simultaneously)")
+        print("  ALL b 180  -> All motors backward 180 steps (simultaneously)")
         print("="*70 + "\n")
 
         while True:
@@ -137,9 +197,40 @@ def main():
             if cmd[0] == 'q':
                 break
 
+            # 모든 모터 동시 작동
+            if cmd[0] == 'all':
+                if len(cmd) < 2:
+                    print("[ERROR] Please specify direction: f (forward) or b (backward)")
+                    continue
+                
+                if cmd[1] not in ['f', 'b']:
+                    print("[ERROR] Direction must be 'f' (forward) or 'b' (backward)")
+                    continue
+                
+                direction = 0 if cmd[1] == 'f' else 1
+                
+                try:
+                    steps = int(cmd[2]) if len(cmd) >= 3 else DEFAULT_STEPS
+                except ValueError:
+                    print("[ERROR] Invalid steps value")
+                    continue
+                
+                if steps <= 0:
+                    print("[ERROR] Steps must be positive")
+                    continue
+                
+                delay = DEFAULT_DELAY
+                
+                try:
+                    move_all_motors_sync(h, motors, steps, direction, delay)
+                except KeyboardInterrupt:
+                    print("\n[WARN] All motors movement interrupted!")
+                
+                continue
+
             # 모터 선택 확인
             if cmd[0] not in motors:
-                print(f"[ERROR] Unknown command '{cmd[0]}'. Use M1, M2, M3, or q")
+                print(f"[ERROR] Unknown command '{cmd[0]}'. Use M1, M2, M3, ALL, or q")
                 continue
 
             motor_info = motors[cmd[0]]
