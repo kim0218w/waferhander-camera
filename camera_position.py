@@ -2,8 +2,16 @@ import cv2
 import numpy as np
 import time
 
+# Raspberry Pi 카메라 지원
+try:
+    from picamera2 import Picamera2
+    USE_PICAMERA = True
+except ImportError:
+    USE_PICAMERA = False
+    print("[INFO] picamera2 not found, using standard camera")
+
 # ===== 사용자 설정 =====
-SOURCE = 0                 # 0=웹캠
+SOURCE = 0                 # 0=웹캠 (USB 카메라용)
 A4_LONG_M = 0.297          # A4 긴변 (세로) 297mm = 0.297m
 A4_SHORT_M = 0.210         # A4 짧은변 (가로) 210mm = 0.210m
 KNOWN_DISTANCE_M = 1.50    # 's' 로 캘리브레이트할 때 실제 거리(미터)
@@ -196,32 +204,67 @@ def main():
     global FOCAL_PX, calibration_mode, current_point_name, reference_points_px, homography_matrix
     
     print("[INFO] 카메라 초기화 중...")
-    cap = cv2.VideoCapture(SOURCE)
-    if not cap.isOpened():
-        print("[ERROR] 카메라를 열 수 없습니다!")
-        print("[ERROR] 카메라가 연결되어 있는지 확인하세요.")
-        print("[ERROR] Raspberry Pi의 경우 'sudo raspi-config'에서 카메라를 활성화했는지 확인하세요.")
-        return
     
-    # 카메라 설정 (Raspberry Pi 호환성 향상)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # 버퍼 크기 줄여서 지연 감소
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    # Raspberry Pi 카메라 또는 USB 카메라 초기화
+    picam = None
+    cap = None
     
-    # 카메라 워밍업 (일부 카메라는 초기 프레임이 불안정함)
-    print("[INFO] 카메라 워밍업 중...")
-    for _ in range(5):
-        cap.read()
-        time.sleep(0.1)
-    
-    # 카메라가 제대로 작동하는지 테스트
-    ret, test_frame = cap.read()
-    if not ret or test_frame is None:
-        print("[ERROR] 카메라에서 프레임을 읽을 수 없습니다!")
-        cap.release()
-        return
-    
-    print(f"[INFO] 카메라 초기화 성공! 해상도: {test_frame.shape[1]}x{test_frame.shape[0]}")
+    if USE_PICAMERA:
+        try:
+            print("[INFO] Raspberry Pi 카메라 모듈 사용")
+            picam = Picamera2()
+            # 카메라 설정
+            config = picam.create_preview_configuration(
+                main={"size": (1280, 720), "format": "RGB888"}
+            )
+            picam.configure(config)
+            picam.start()
+            
+            # 카메라 워밍업
+            print("[INFO] 카메라 워밍업 중...")
+            time.sleep(2)
+            
+            # 테스트 프레임
+            test_frame = picam.capture_array()
+            if test_frame is None:
+                print("[ERROR] 카메라에서 프레임을 읽을 수 없습니다!")
+                picam.stop()
+                return
+            
+            print(f"[INFO] 카메라 초기화 성공! 해상도: {test_frame.shape[1]}x{test_frame.shape[0]}")
+            
+        except Exception as e:
+            print(f"[ERROR] Raspberry Pi 카메라 초기화 실패: {e}")
+            print("[ERROR] 'libcamera-hello' 명령어로 카메라가 작동하는지 확인하세요.")
+            return
+    else:
+        # USB 카메라 사용
+        print("[INFO] USB 카메라 사용")
+        cap = cv2.VideoCapture(SOURCE)
+        if not cap.isOpened():
+            print("[ERROR] 카메라를 열 수 없습니다!")
+            print("[ERROR] 카메라가 연결되어 있는지 확인하세요.")
+            return
+        
+        # 카메라 설정
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        
+        # 카메라 워밍업
+        print("[INFO] 카메라 워밍업 중...")
+        for _ in range(5):
+            cap.read()
+            time.sleep(0.1)
+        
+        # 테스트 프레임
+        ret, test_frame = cap.read()
+        if not ret or test_frame is None:
+            print("[ERROR] 카메라에서 프레임을 읽을 수 없습니다!")
+            cap.release()
+            return
+        
+        print(f"[INFO] 카메라 초기화 성공! 해상도: {test_frame.shape[1]}x{test_frame.shape[0]}")
 
     # EMA 변수들
     ema_d = None
@@ -264,11 +307,19 @@ def main():
     print("[INFO] 프로그램 실행 중... 종료하려면 'q'를 누르세요.")
 
     while True:
-        ret, frame = cap.read()
-        if not ret or frame is None:
-            print("[WARN] 프레임 읽기 실패, 재시도 중...")
-            time.sleep(0.1)
-            continue
+        # 프레임 읽기 (picamera2 또는 USB 카메라)
+        if picam is not None:
+            frame = picam.capture_array()
+            if frame is None:
+                print("[WARN] 프레임 읽기 실패, 재시도 중...")
+                time.sleep(0.1)
+                continue
+        else:
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                print("[WARN] 프레임 읽기 실패, 재시도 중...")
+                time.sleep(0.1)
+                continue
 
         h_img, w_img = frame.shape[:2]
         quad = largest_quad(frame)
@@ -428,7 +479,11 @@ def main():
             show_plane_coords = False
             print("[INFO] Plane calibration reset")
 
-    cap.release()
+    # 리소스 정리
+    if picam is not None:
+        picam.stop()
+    if cap is not None:
+        cap.release()
     cv2.destroyAllWindows()
 
 if __name__ == "__main__":
