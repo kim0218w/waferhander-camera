@@ -195,9 +195,33 @@ def mouse_callback(event, x, y, flags, param):
 def main():
     global FOCAL_PX, calibration_mode, current_point_name, reference_points_px, homography_matrix
     
+    print("[INFO] 카메라 초기화 중...")
     cap = cv2.VideoCapture(SOURCE)
     if not cap.isOpened():
-        raise RuntimeError("카메라 열기 실패")
+        print("[ERROR] 카메라를 열 수 없습니다!")
+        print("[ERROR] 카메라가 연결되어 있는지 확인하세요.")
+        print("[ERROR] Raspberry Pi의 경우 'sudo raspi-config'에서 카메라를 활성화했는지 확인하세요.")
+        return
+    
+    # 카메라 설정 (Raspberry Pi 호환성 향상)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # 버퍼 크기 줄여서 지연 감소
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    
+    # 카메라 워밍업 (일부 카메라는 초기 프레임이 불안정함)
+    print("[INFO] 카메라 워밍업 중...")
+    for _ in range(5):
+        cap.read()
+        time.sleep(0.1)
+    
+    # 카메라가 제대로 작동하는지 테스트
+    ret, test_frame = cap.read()
+    if not ret or test_frame is None:
+        print("[ERROR] 카메라에서 프레임을 읽을 수 없습니다!")
+        cap.release()
+        return
+    
+    print(f"[INFO] 카메라 초기화 성공! 해상도: {test_frame.shape[1]}x{test_frame.shape[0]}")
 
     # EMA 변수들
     ema_d = None
@@ -209,8 +233,18 @@ def main():
     # 평면 좌표 표시 모드
     show_plane_coords = False
 
-    cv2.namedWindow("A4 Position Tracker")
-    cv2.setMouseCallback("A4 Position Tracker", mouse_callback)
+    # 창 생성 및 마우스 콜백 설정
+    window_name = "A4 Position Tracker"
+    try:
+        cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(window_name, 1280, 720)
+        cv2.setMouseCallback(window_name, mouse_callback)
+        print("[INFO] 디스플레이 창 생성 성공")
+    except Exception as e:
+        print(f"[ERROR] 디스플레이 창 생성 실패: {e}")
+        print("[ERROR] X11 디스플레이가 활성화되어 있는지 확인하세요.")
+        cap.release()
+        return
 
     print("\n" + "="*70)
     print(" A4 3D Position and Plane Coordinate Tracker")
@@ -227,11 +261,14 @@ def main():
     print("  3. Click on X-axis point (bottom-right corner)")
     print("  4. Click on Y-axis point (top-left corner)")
     print("="*70 + "\n")
+    print("[INFO] 프로그램 실행 중... 종료하려면 'q'를 누르세요.")
 
     while True:
         ret, frame = cap.read()
-        if not ret:
-            break
+        if not ret or frame is None:
+            print("[WARN] 프레임 읽기 실패, 재시도 중...")
+            time.sleep(0.1)
+            continue
 
         h_img, w_img = frame.shape[:2]
         quad = largest_quad(frame)
@@ -250,7 +287,11 @@ def main():
         
         if quad is not None:
             # 변 길이 측정
-            _, long_px, short_px = edge_lengths(quad)
+            edge_result = edge_lengths(quad)
+            if edge_result is None:
+                continue
+            
+            _, long_px, short_px = edge_result
 
             # 화면에 외곽선 그리기
             cv2.polylines(frame, [quad.astype(int)], True, (0,255,0), 2)
@@ -330,7 +371,12 @@ def main():
             y_offset = 60 if calibration_mode else 30
             cv2.putText(frame, "A4 not found", (20, y_offset), FONT, 0.8, (0,0,255), 2)
 
-        cv2.imshow("A4 Position Tracker", frame)
+        try:
+            cv2.imshow(window_name, frame)
+        except Exception as e:
+            print(f"[ERROR] 프레임 표시 실패: {e}")
+            break
+        
         key = cv2.waitKey(1) & 0xFF
         
         if key == ord('q'):
@@ -340,7 +386,12 @@ def main():
             if quad is None:
                 print("[WARN] A4가 화면에 보일 때 눌러주세요.")
             else:
-                _, long_px, short_px = edge_lengths(quad)
+                edge_result = edge_lengths(quad)
+                if edge_result is None:
+                    print("[WARN] A4 변 길이를 측정할 수 없습니다.")
+                    continue
+                
+                _, long_px, short_px = edge_result
                 H_real_m = A4_LONG_M if long_px >= short_px else A4_SHORT_M
                 h_px = max(long_px, short_px)
                 FOCAL_PX = estimate_focal_px(h_px, H_real_m, KNOWN_DISTANCE_M)
@@ -381,5 +432,15 @@ def main():
     cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n[INFO] 프로그램이 사용자에 의해 중단되었습니다.")
+    except Exception as e:
+        print(f"\n[ERROR] 예상치 못한 오류 발생: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        cv2.destroyAllWindows()
+        print("[INFO] 프로그램 종료")
 
