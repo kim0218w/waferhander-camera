@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import time
+import csv
 from collections import deque
 
 # Raspberry Pi 카메라 지원
@@ -24,6 +25,12 @@ tracking_points = []  # 추적할 3개의 포인트 [(x, y), ...]
 point_distances = []  # 각 포인트의 거리
 calibration_mode = False
 calibration_point_idx = 0
+
+# 측정 관련 변수
+measurement_interval = 1.0  # 측정 간격 (초)
+last_measurement_time = 0
+measurement_count = 0
+measurement_log = []  # 측정 기록 저장
 
 # ===== 칼만 필터 클래스 =====
 class KalmanFilter1D:
@@ -156,8 +163,28 @@ def mouse_callback(event, x, y, flags, param):
                 print(f"[INFO] Reference size: {REFERENCE_SIZE_PX:.2f} pixels")
                 print("[INFO] Now press 's' to calibrate distance")
 
+def save_measurement_log(filename='measurement_log.csv'):
+    """측정 기록을 CSV 파일로 저장"""
+    global measurement_log
+    
+    if len(measurement_log) == 0:
+        print("[WARN] No measurements to save")
+        return
+    
+    try:
+        with open(filename, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(['Timestamp', 'Count', 'Distance(m)', 'Distance(mm)', 
+                           'P1_x', 'P1_y', 'P2_x', 'P2_y', 'P3_x', 'P3_y',
+                           'P1_dist_px', 'P2_dist_px', 'P3_dist_px'])
+            writer.writerows(measurement_log)
+        print(f"[INFO] Measurement log saved to {filename}")
+    except Exception as e:
+        print(f"[ERROR] Failed to save log: {e}")
+
 def main():
     global FOCAL_PX, REFERENCE_SIZE_PX, KNOWN_DISTANCE_M, calibration_mode, tracking_points, point_distances
+    global measurement_interval, last_measurement_time, measurement_count, measurement_log
     
     print("[INFO] 카메라 초기화 중...")
     
@@ -237,15 +264,19 @@ def main():
     print("  's' - Calibrate distance (set known distance)")
     print("  'r' - Reset points")
     print("  'd' - Toggle feature point detection")
+    print("  'm' - Start/Stop 1-second interval measurement")
+    print("  'l' - Save measurement log to CSV")
     print("  'q' - Quit")
     print("\nCalibration Steps:")
     print("  1. Press 'c' and click 3 points on the object")
     print("  2. Position object at known distance (default: 1.0m)")
     print("  3. Press 's' to calibrate")
+    print("  4. Press 'm' to start automatic measurements every 1 second")
     print("="*70 + "\n")
     print("[INFO] 프로그램 실행 중... 종료하려면 'q'를 누르세요.")
 
     show_features = False
+    measurement_mode = False  # 1초 간격 측정 모드
     
     while True:
         # 프레임 읽기
@@ -317,8 +348,48 @@ def main():
                     # 필터 적용 (평균 거리만 필터링)
                     filtered_distance = filters[0].update(estimated_distance_m)
                     
+                    # 1초 간격 측정
+                    current_time = time.time()
+                    if measurement_mode and (current_time - last_measurement_time) >= measurement_interval:
+                        measurement_count += 1
+                        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+                        
+                        # 측정 데이터 기록
+                        measurement_data = [
+                            timestamp,
+                            measurement_count,
+                            f"{filtered_distance:.4f}",
+                            f"{filtered_distance*1000:.1f}",
+                            int(tracking_points[0][0]), int(tracking_points[0][1]),
+                            int(tracking_points[1][0]), int(tracking_points[1][1]),
+                            int(tracking_points[2][0]), int(tracking_points[2][1]),
+                            f"{pixel_distances[0]:.2f}",
+                            f"{pixel_distances[1]:.2f}",
+                            f"{pixel_distances[2]:.2f}"
+                        ]
+                        measurement_log.append(measurement_data)
+                        
+                        # 콘솔에 출력
+                        print(f"\n[MEASUREMENT #{measurement_count}] {timestamp}")
+                        print(f"  Distance: {filtered_distance:.4f}m ({filtered_distance*1000:.1f}mm)")
+                        print(f"  P1: ({int(tracking_points[0][0])}, {int(tracking_points[0][1])}) - {pixel_distances[0]:.2f}px from center")
+                        print(f"  P2: ({int(tracking_points[1][0])}, {int(tracking_points[1][1])}) - {pixel_distances[1]:.2f}px from center")
+                        print(f"  P3: ({int(tracking_points[2][0])}, {int(tracking_points[2][1])}) - {pixel_distances[2]:.2f}px from center")
+                        
+                        last_measurement_time = current_time
+                    
                     # 정보 표시
                     y_offset = 60
+                    
+                    # 측정 모드 표시
+                    if measurement_mode:
+                        time_until_next = max(0, measurement_interval - (current_time - last_measurement_time))
+                        mode_text = f"[MEASURING] Count: {measurement_count} | Next in: {time_until_next:.1f}s"
+                        cv2.putText(display, mode_text, (20, 30), FONT, 0.6, (0, 255, 0), 2)
+                    else:
+                        cv2.putText(display, "[IDLE] Press 'm' to start measurements", 
+                                   (20, 30), FONT, 0.6, (200, 200, 200), 2)
+                    
                     cv2.putText(display, "=== Distance Measurements ===", 
                                (20, y_offset), FONT, 0.7, (255, 255, 255), 2)
                     
@@ -438,6 +509,33 @@ def main():
             show_features = not show_features
             status = "ON" if show_features else "OFF"
             print(f"[INFO] Feature detection: {status}")
+        
+        elif key == ord('m'):
+            # 1초 간격 측정 모드 토글
+            if len(tracking_points) != 3:
+                print("[WARN] Please select 3 points first (press 'c')")
+            elif REFERENCE_SIZE_PX is None:
+                print("[WARN] Please calibrate distance first (press 's')")
+            else:
+                measurement_mode = not measurement_mode
+                if measurement_mode:
+                    last_measurement_time = time.time()
+                    measurement_count = 0
+                    measurement_log = []
+                    print("\n[INFO] ===== MEASUREMENT MODE STARTED =====")
+                    print("[INFO] Recording measurements every 1 second")
+                    print("[INFO] Press 'm' again to stop, 'l' to save log")
+                else:
+                    print(f"\n[INFO] ===== MEASUREMENT MODE STOPPED =====")
+                    print(f"[INFO] Total measurements: {measurement_count}")
+        
+        elif key == ord('l'):
+            # 측정 로그 저장
+            if len(measurement_log) == 0:
+                print("[WARN] No measurements to save. Start measurement mode first (press 'm')")
+            else:
+                save_measurement_log()
+                print(f"[INFO] Saved {len(measurement_log)} measurements")
 
     # 리소스 정리
     if picam is not None:
