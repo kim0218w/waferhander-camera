@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import time
+from collections import deque
 
 # Raspberry Pi 카메라 지원
 try:
@@ -32,6 +33,66 @@ reference_points_px = {}  # 화면에서 선택한 3점의 픽셀 좌표
 calibration_mode = False
 current_point_name = None
 homography_matrix = None
+
+# ===== 칼만 필터 클래스 =====
+class KalmanFilter1D:
+    """1D 칼만 필터 (거리, X, Y, 회전각 등에 사용)"""
+    def __init__(self, process_variance=1e-5, measurement_variance=1e-1):
+        self.process_variance = process_variance  # 프로세스 노이즈 (작을수록 예측 신뢰)
+        self.measurement_variance = measurement_variance  # 측정 노이즈 (작을수록 측정 신뢰)
+        self.estimate = None
+        self.error_estimate = 1.0
+        
+    def update(self, measurement):
+        """새로운 측정값으로 필터 업데이트"""
+        if self.estimate is None:
+            self.estimate = measurement
+            return self.estimate
+        
+        # Prediction
+        error_prediction = self.error_estimate + self.process_variance
+        
+        # Update
+        kalman_gain = error_prediction / (error_prediction + self.measurement_variance)
+        self.estimate = self.estimate + kalman_gain * (measurement - self.estimate)
+        self.error_estimate = (1 - kalman_gain) * error_prediction
+        
+        return self.estimate
+    
+    def reset(self):
+        """필터 리셋"""
+        self.estimate = None
+        self.error_estimate = 1.0
+
+class MovingAverageFilter:
+    """이동 평균 필터"""
+    def __init__(self, window_size=10):
+        self.window_size = window_size
+        self.values = deque(maxlen=window_size)
+    
+    def update(self, value):
+        """새로운 값 추가 및 평균 계산"""
+        self.values.append(value)
+        return np.mean(self.values)
+    
+    def reset(self):
+        """필터 리셋"""
+        self.values.clear()
+
+class MedianFilter:
+    """중앙값 필터 (이상치 제거에 효과적)"""
+    def __init__(self, window_size=5):
+        self.window_size = window_size
+        self.values = deque(maxlen=window_size)
+    
+    def update(self, value):
+        """새로운 값 추가 및 중앙값 계산"""
+        self.values.append(value)
+        return np.median(self.values)
+    
+    def reset(self):
+        """필터 리셋"""
+        self.values.clear()
 
 def largest_quad(img):
     """가장 큰 사각형(4점)을 찾고 꼭짓점들을 정렬해서 반환"""
@@ -266,12 +327,44 @@ def main():
         
         print(f"[INFO] 카메라 초기화 성공! 해상도: {test_frame.shape[1]}x{test_frame.shape[0]}")
 
-    # EMA 변수들
+    # ===== 필터링 설정 =====
+    FILTER_MODE = 'kalman'  # 'none', 'ema', 'kalman', 'moving_avg', 'median'
+    EMA_ALPHA = 0.2  # EMA alpha (낮을수록 부드럽지만 느림)
+    
+    # 필터 초기화
+    if FILTER_MODE == 'kalman':
+        filter_d = KalmanFilter1D(process_variance=1e-5, measurement_variance=1e-2)
+        filter_x = KalmanFilter1D(process_variance=1e-5, measurement_variance=1e-2)
+        filter_y = KalmanFilter1D(process_variance=1e-5, measurement_variance=1e-2)
+        filter_rot = KalmanFilter1D(process_variance=1e-5, measurement_variance=1e-1)
+    elif FILTER_MODE == 'moving_avg':
+        filter_d = MovingAverageFilter(window_size=10)
+        filter_x = MovingAverageFilter(window_size=10)
+        filter_y = MovingAverageFilter(window_size=10)
+        filter_rot = MovingAverageFilter(window_size=10)
+    elif FILTER_MODE == 'median':
+        filter_d = MedianFilter(window_size=7)
+        filter_x = MedianFilter(window_size=7)
+        filter_y = MedianFilter(window_size=7)
+        filter_rot = MedianFilter(window_size=7)
+    else:
+        filter_d = filter_x = filter_y = filter_rot = None
+    
+    # EMA 변수들 (EMA 모드용)
     ema_d = None
     ema_x = None
     ema_y = None
     ema_rot = None
-    alpha = 0.2  # 지터 완화용 EMA
+    
+    # 스냅샷 모드
+    snapshot_mode = False
+    snapshot_values = {'d': None, 'x': None, 'y': None, 'rot': None}
+    
+    # 현재 필터링된 값들
+    filtered_d = None
+    filtered_x = None
+    filtered_y = None
+    filtered_rot = None
 
     # 평면 좌표 표시 모드
     show_plane_coords = False
@@ -292,17 +385,24 @@ def main():
     print("\n" + "="*70)
     print(" A4 3D Position and Plane Coordinate Tracker")
     print("="*70)
+    print(f"\n[FILTER MODE: {FILTER_MODE.upper()}]")
     print("\nControls:")
     print("  's' - Calibrate focal length (camera distance)")
     print("  'c' - Start plane calibration (3-point setup)")
     print("  'p' - Toggle plane coordinate display")
     print("  'r' - Reset plane calibration")
+    print("  'f' - Freeze/Unfreeze values (snapshot mode)")
+    print("  '1-5' - Change filter mode (1=None, 2=EMA, 3=Kalman, 4=MovingAvg, 5=Median)")
     print("  'q' - Quit")
     print("\nPlane Calibration Steps:")
     print("  1. Press 'c'")
     print("  2. Click on Origin point (bottom-left corner of A4)")
     print("  3. Click on X-axis point (bottom-right corner)")
     print("  4. Click on Y-axis point (top-left corner)")
+    print("\nStabilization Tips:")
+    print("  - Press 'f' to freeze current values")
+    print("  - Kalman filter (default) provides best stability")
+    print("  - Adjust lighting and camera position for better tracking")
     print("="*70 + "\n")
     print("[INFO] 프로그램 실행 중... 종료하려면 'q'를 누르세요.")
 
@@ -371,25 +471,59 @@ def main():
                     # 회전각 계산
                     rotation = get_rotation_angle(quad)
                     
-                    # EMA 적용 (지터 완화)
-                    ema_d = D if ema_d is None else (alpha*D + (1-alpha)*ema_d)
-                    ema_x = x_m if ema_x is None else (alpha*x_m + (1-alpha)*ema_x)
-                    ema_y = y_m if ema_y is None else (alpha*y_m + (1-alpha)*ema_y)
-                    if rotation is not None:
-                        ema_rot = rotation if ema_rot is None else (alpha*rotation + (1-alpha)*ema_rot)
+                    # === 필터링 적용 ===
+                    if snapshot_mode:
+                        # 스냅샷 모드: 고정된 값 사용
+                        filtered_d = snapshot_values['d']
+                        filtered_x = snapshot_values['x']
+                        filtered_y = snapshot_values['y']
+                        filtered_rot = snapshot_values['rot']
+                    elif FILTER_MODE == 'none':
+                        # 필터 없음: 원본 값 사용
+                        filtered_d = D
+                        filtered_x = x_m
+                        filtered_y = y_m
+                        filtered_rot = rotation
+                    elif FILTER_MODE == 'ema':
+                        # EMA 필터 적용
+                        ema_d = D if ema_d is None else (EMA_ALPHA*D + (1-EMA_ALPHA)*ema_d)
+                        ema_x = x_m if ema_x is None else (EMA_ALPHA*x_m + (1-EMA_ALPHA)*ema_x)
+                        ema_y = y_m if ema_y is None else (EMA_ALPHA*y_m + (1-EMA_ALPHA)*ema_y)
+                        if rotation is not None:
+                            ema_rot = rotation if ema_rot is None else (EMA_ALPHA*rotation + (1-EMA_ALPHA)*ema_rot)
+                        filtered_d = ema_d
+                        filtered_x = ema_x
+                        filtered_y = ema_y
+                        filtered_rot = ema_rot
+                    else:
+                        # Kalman, Moving Average, Median 필터 적용
+                        filtered_d = filter_d.update(D)
+                        filtered_x = filter_x.update(x_m)
+                        filtered_y = filter_y.update(y_m)
+                        if rotation is not None:
+                            filtered_rot = filter_rot.update(rotation)
                     
                     # === 카메라 좌표계 표시 ===
                     y_offset = 60 if calibration_mode else 30
+                    
+                    # 필터 모드 표시
+                    mode_text = f"[{FILTER_MODE.upper()}]" + (" [FROZEN]" if snapshot_mode else "")
+                    cv2.putText(frame, mode_text, (20, y_offset-25), FONT, 0.5, (255,255,0), 2)
+                    
                     cv2.putText(frame, "=== Camera Coordinates ===", 
                                (20, y_offset), FONT, 0.6, (255,255,255), 2)
-                    cv2.putText(frame, f"Z(Distance): {ema_d:.3f} m", 
-                               (20, y_offset+30), FONT, 0.7, (0,255,0), 2)
-                    cv2.putText(frame, f"X(Horizontal): {ema_x:+.3f} m", 
-                               (20, y_offset+60), FONT, 0.7, (0,255,0), 2)
-                    cv2.putText(frame, f"Y(Vertical): {ema_y:+.3f} m", 
-                               (20, y_offset+90), FONT, 0.7, (0,255,0), 2)
-                    if ema_rot is not None:
-                        cv2.putText(frame, f"Rotation: {ema_rot:.1f} deg", 
+                    
+                    if filtered_d is not None:
+                        cv2.putText(frame, f"Z(Distance): {filtered_d:.3f} m", 
+                                   (20, y_offset+30), FONT, 0.7, (0,255,0), 2)
+                    if filtered_x is not None:
+                        cv2.putText(frame, f"X(Horizontal): {filtered_x:+.3f} m", 
+                                   (20, y_offset+60), FONT, 0.7, (0,255,0), 2)
+                    if filtered_y is not None:
+                        cv2.putText(frame, f"Y(Vertical): {filtered_y:+.3f} m", 
+                                   (20, y_offset+90), FONT, 0.7, (0,255,0), 2)
+                    if filtered_rot is not None:
+                        cv2.putText(frame, f"Rotation: {filtered_rot:.1f} deg", 
                                    (20, y_offset+120), FONT, 0.7, (0,255,0), 2)
                     
                     # === 평면 좌표계 표시 ===
@@ -446,9 +580,16 @@ def main():
                 H_real_m = A4_LONG_M if long_px >= short_px else A4_SHORT_M
                 h_px = max(long_px, short_px)
                 FOCAL_PX = estimate_focal_px(h_px, H_real_m, KNOWN_DISTANCE_M)
-                ema_d = None
-                ema_x = None
-                ema_y = None
+                
+                # 필터 리셋
+                ema_d = ema_x = ema_y = ema_rot = None
+                if FILTER_MODE in ['kalman', 'moving_avg', 'median']:
+                    if hasattr(filter_d, 'reset'):
+                        filter_d.reset()
+                        filter_x.reset()
+                        filter_y.reset()
+                        filter_rot.reset()
+                
                 print(f"[INFO] Focal length calibrated: f_px = {FOCAL_PX:.2f}")
                 print(f"       (distance={KNOWN_DISTANCE_M}m, h_px={h_px:.1f}px, H={H_real_m}m)")
         
@@ -478,6 +619,57 @@ def main():
             current_point_name = None
             show_plane_coords = False
             print("[INFO] Plane calibration reset")
+        
+        elif key == ord('f'):
+            # 스냅샷 모드 토글 (값 고정/해제)
+            snapshot_mode = not snapshot_mode
+            if snapshot_mode:
+                # 현재 값을 스냅샷으로 저장
+                snapshot_values['d'] = filtered_d
+                snapshot_values['x'] = filtered_x
+                snapshot_values['y'] = filtered_y
+                snapshot_values['rot'] = filtered_rot
+                print(f"[INFO] Values FROZEN at: D={filtered_d:.3f}m, X={filtered_x:+.3f}m, Y={filtered_y:+.3f}m")
+            else:
+                print("[INFO] Values UNFROZEN - tracking resumed")
+        
+        elif key == ord('1'):
+            # 필터 없음
+            FILTER_MODE = 'none'
+            print("[INFO] Filter mode: NONE (no filtering)")
+        
+        elif key == ord('2'):
+            # EMA 필터
+            FILTER_MODE = 'ema'
+            ema_d = ema_x = ema_y = ema_rot = None
+            print(f"[INFO] Filter mode: EMA (alpha={EMA_ALPHA})")
+        
+        elif key == ord('3'):
+            # Kalman 필터
+            FILTER_MODE = 'kalman'
+            filter_d = KalmanFilter1D(process_variance=1e-5, measurement_variance=1e-2)
+            filter_x = KalmanFilter1D(process_variance=1e-5, measurement_variance=1e-2)
+            filter_y = KalmanFilter1D(process_variance=1e-5, measurement_variance=1e-2)
+            filter_rot = KalmanFilter1D(process_variance=1e-5, measurement_variance=1e-1)
+            print("[INFO] Filter mode: KALMAN (best stability)")
+        
+        elif key == ord('4'):
+            # Moving Average 필터
+            FILTER_MODE = 'moving_avg'
+            filter_d = MovingAverageFilter(window_size=10)
+            filter_x = MovingAverageFilter(window_size=10)
+            filter_y = MovingAverageFilter(window_size=10)
+            filter_rot = MovingAverageFilter(window_size=10)
+            print("[INFO] Filter mode: MOVING AVERAGE (10 frames)")
+        
+        elif key == ord('5'):
+            # Median 필터
+            FILTER_MODE = 'median'
+            filter_d = MedianFilter(window_size=7)
+            filter_x = MedianFilter(window_size=7)
+            filter_y = MedianFilter(window_size=7)
+            filter_rot = MedianFilter(window_size=7)
+            print("[INFO] Filter mode: MEDIAN (noise reduction)")
 
     # 리소스 정리
     if picam is not None:
