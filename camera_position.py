@@ -84,6 +84,59 @@ def calculate_3d_position_fixed_z(point_px, focal_length, fixed_z, image_width, 
     
     return X, Y, Z, distance_3d
 
+def calculate_alignment_metrics(points_3d):
+    """
+    3개 점의 정렬 상태를 측정
+    
+    Args:
+        points_3d: [(X1, Y1, Z1), (X2, Y2, Z2), (X3, Y3, Z3)]
+    
+    Returns:
+        dict: {
+            'z_std': Z축 표준편차,
+            'z_range': Z축 최대-최소 차이,
+            'collinearity': 공선성 정도 (0에 가까울수록 일직선),
+            'is_aligned': 정렬 여부 (bool)
+        }
+    """
+    if len(points_3d) != 3:
+        return None
+    
+    # Z축 분석
+    z_values = [p[2] for p in points_3d]
+    z_std = np.std(z_values)
+    z_range = max(z_values) - min(z_values)
+    
+    # 공선성 측정 (3점이 일직선상에 있는지)
+    # 벡터 AB와 AC를 구하고 외적(cross product)의 크기를 계산
+    p1, p2, p3 = points_3d
+    vec_AB = np.array([p2[0] - p1[0], p2[1] - p1[1], p2[2] - p1[2]])
+    vec_AC = np.array([p3[0] - p1[0], p3[1] - p1[1], p3[2] - p1[2]])
+    
+    # 외적의 크기 (0에 가까울수록 일직선)
+    cross_product = np.cross(vec_AB, vec_AC)
+    collinearity = np.linalg.norm(cross_product)
+    
+    # 정규화 (거리 기준)
+    distance_AB = np.linalg.norm(vec_AB)
+    distance_AC = np.linalg.norm(vec_AC)
+    if distance_AB > 0 and distance_AC > 0:
+        collinearity_normalized = collinearity / (distance_AB * distance_AC)
+    else:
+        collinearity_normalized = 0
+    
+    # 정렬 판정 기준
+    # Z축 범위가 1mm 이내이고, 공선성이 낮으면 정렬된 것으로 판정
+    is_aligned = (z_range < 0.001) and (collinearity_normalized < 0.05)
+    
+    return {
+        'z_std': z_std,
+        'z_range': z_range,
+        'collinearity': collinearity,
+        'collinearity_normalized': collinearity_normalized,
+        'is_aligned': is_aligned
+    }
+
 def mouse_callback(event, x, y, flags, param):
     """마우스 클릭으로 3점 선택"""
     global selected_points, tracked_points, tracking_active
@@ -153,16 +206,25 @@ def save_measurement_log():
         # 헤더
         f.write("Timestamp,Point1_X(cm),Point1_Y(cm),Point1_Z(cm),Point1_Distance(cm),")
         f.write("Point2_X(cm),Point2_Y(cm),Point2_Z(cm),Point2_Distance(cm),")
-        f.write("Point3_X(cm),Point3_Y(cm),Point3_Z(cm),Point3_Distance(cm)\n")
+        f.write("Point3_X(cm),Point3_Y(cm),Point3_Z(cm),Point3_Distance(cm),")
+        f.write("Z_Range(mm),Collinearity,Aligned\n")
         
         # 데이터
         for entry in measurement_log:
             f.write(f"{entry['timestamp']},")
             for i in range(3):
                 pt = entry['points'][i]
-                f.write(f"{pt['X']:.2f},{pt['Y']:.2f},{pt['Z']:.2f},{pt['distance']:.2f}")
-                if i < 2:
-                    f.write(",")
+                f.write(f"{pt['X']:.2f},{pt['Y']:.2f},{pt['Z']:.2f},{pt['distance']:.2f},")
+            
+            # 정렬 정보 추가
+            if 'alignment' in entry and entry['alignment'] is not None:
+                align = entry['alignment']
+                f.write(f"{align['z_range']*1000:.2f},")  # mm로 변환
+                f.write(f"{align['collinearity_normalized']:.4f},")
+                f.write(f"{'YES' if align['is_aligned'] else 'NO'}")
+            else:
+                f.write("N/A,N/A,N/A")
+            
             f.write("\n")
     
     print(f"[INFO] 측정 데이터 저장: {filename} ({len(measurement_log)}개 기록)")
@@ -239,7 +301,7 @@ def main():
     cv2.setMouseCallback(window_name, mouse_callback)
     
     print("\n" + "="*70)
-    print(" Fixed Z-Axis Distance Tracker")
+    print(" Fixed Z-Axis Distance Tracker with Alignment Detection")
     print("="*70)
     print(f"\n설정: Z축 고정 거리 = {FIXED_Z_DISTANCE*100:.1f}cm")
     print("\n사용법:")
@@ -247,6 +309,11 @@ def main():
     print("  2. 자동으로 실시간 추적 시작")
     print("  3. 카메라를 좌우로 움직이면 각 점과의 거리가 실시간으로 표시됩니다")
     print("  4. 'm' 키를 누르면 1초 단위로 거리 측정 시작 (다시 'm' 키로 중지)")
+    print("  5. 오른쪽 상단에서 3점의 정렬 상태를 실시간으로 확인할 수 있습니다")
+    print("\n정렬 측정 항목:")
+    print("  - Z-axis range: 3점의 Z축 편차 (1mm 이하면 녹색)")
+    print("  - Collinearity: 3점의 일직선 정도 (0.05 이하면 녹색)")
+    print("  - Status: ALIGNED (녹색 체크) 또는 NOT ALIGNED (빨간색 X)")
     print("\n단축키:")
     print("  'm' - 1초 단위 측정 시작/중지")
     print("  'r' - 점 선택 초기화 (다시 선택)")
@@ -320,6 +387,7 @@ def main():
         
         # 현재 프레임의 측정 데이터 저장용
         current_measurements = []
+        points_3d = []  # 정렬 측정용 3D 좌표 리스트
         
         for i in range(len(tracked_points)):
             point = tracked_points[i]
@@ -346,6 +414,9 @@ def main():
                 else:
                     ema_distances[i] = alpha * distance_3d + (1 - alpha) * ema_distances[i]
                 
+                # 3D 좌표 저장 (정렬 측정용)
+                points_3d.append((X, Y, Z))
+                
                 # 측정 데이터 저장
                 current_measurements.append({
                     'X': X * 100,  # m → cm
@@ -371,19 +442,81 @@ def main():
                     cv2.putText(frame, f"Pixel shift: X{dx:+.0f}px Y{dy:+.0f}px", 
                                (20, y_offset + 90), FONT, 0.5, color, 1)
         
+        # 정렬 상태 측정 및 표시
+        if len(points_3d) == 3:
+            alignment = calculate_alignment_metrics(points_3d)
+            if alignment is not None:
+                # 정렬 상태 표시 영역 (오른쪽 상단)
+                align_x = w_img - 480
+                align_y = 120
+                
+                # 배경 박스
+                cv2.rectangle(frame, (align_x - 10, align_y - 30), 
+                             (w_img - 10, align_y + 160), (0, 0, 0), -1)
+                cv2.rectangle(frame, (align_x - 10, align_y - 30), 
+                             (w_img - 10, align_y + 160), (255, 255, 255), 2)
+                
+                # 제목
+                cv2.putText(frame, "=== ALIGNMENT STATUS ===", 
+                           (align_x, align_y), FONT, 0.7, (255, 255, 255), 2)
+                
+                # Z축 편차
+                z_range_mm = alignment['z_range'] * 1000  # m → mm
+                z_color = (0, 255, 0) if z_range_mm < 1.0 else (0, 165, 255) if z_range_mm < 2.0 else (0, 0, 255)
+                cv2.putText(frame, f"Z-axis range: {z_range_mm:.2f}mm", 
+                           (align_x, align_y + 35), FONT, 0.6, z_color, 2)
+                
+                # 공선성
+                col_norm = alignment['collinearity_normalized']
+                col_color = (0, 255, 0) if col_norm < 0.05 else (0, 165, 255) if col_norm < 0.1 else (0, 0, 255)
+                cv2.putText(frame, f"Collinearity: {col_norm:.4f}", 
+                           (align_x, align_y + 70), FONT, 0.6, col_color, 2)
+                
+                # 정렬 상태
+                if alignment['is_aligned']:
+                    status_text = "ALIGNED!"
+                    status_color = (0, 255, 0)
+                    # 체크 마크
+                    cv2.circle(frame, (w_img - 50, align_y + 115), 20, (0, 255, 0), 3)
+                    cv2.line(frame, (w_img - 58, align_y + 115), (w_img - 50, align_y + 123), (0, 255, 0), 3)
+                    cv2.line(frame, (w_img - 50, align_y + 123), (w_img - 38, align_y + 105), (0, 255, 0), 3)
+                else:
+                    status_text = "NOT ALIGNED"
+                    status_color = (0, 0, 255)
+                    # X 마크
+                    cv2.line(frame, (w_img - 65, align_y + 100), (w_img - 35, align_y + 130), (0, 0, 255), 3)
+                    cv2.line(frame, (w_img - 35, align_y + 100), (w_img - 65, align_y + 130), (0, 0, 255), 3)
+                
+                cv2.putText(frame, status_text, 
+                           (align_x, align_y + 120), FONT, 0.8, status_color, 2)
+                
+                # 가이드 메시지
+                if not alignment['is_aligned']:
+                    cv2.putText(frame, "Adjust motor positions", 
+                               (align_x, align_y + 150), FONT, 0.5, (255, 200, 0), 1)
+        
         # 1초마다 측정 기록
         if measurement_active and tracking_active and len(current_measurements) == 3:
             if current_time - last_measurement_time >= 1.0:
                 timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                
+                # 정렬 정보도 함께 저장
+                alignment_info = calculate_alignment_metrics(points_3d) if len(points_3d) == 3 else None
+                
                 measurement_log.append({
                     'timestamp': timestamp,
-                    'points': current_measurements
+                    'points': current_measurements,
+                    'alignment': alignment_info
                 })
                 last_measurement_time = current_time
+                
+                # 콘솔 출력
+                align_status = "ALIGNED" if (alignment_info and alignment_info['is_aligned']) else "NOT ALIGNED"
                 print(f"[MEASUREMENT] {timestamp} - "
                       f"P1: {current_measurements[0]['distance']:.2f}cm, "
                       f"P2: {current_measurements[1]['distance']:.2f}cm, "
-                      f"P3: {current_measurements[2]['distance']:.2f}cm")
+                      f"P3: {current_measurements[2]['distance']:.2f}cm - "
+                      f"{align_status}")
         
         # 화면 표시
         cv2.imshow(window_name, frame)
