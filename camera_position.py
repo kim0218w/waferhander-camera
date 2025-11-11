@@ -47,6 +47,7 @@ graph_lock = threading.Lock()
 
 # 실시간 막대그래프 표시 설정
 show_bar_graph = True  # 기본적으로 막대그래프 표시
+bar_graph_position = 'right'  # 'bottom' 또는 'right' - 오른쪽에 작게 배치
 
 def draw_realtime_bar_graph(frame, distances_cm, point_names, colors, position='bottom'):
     """
@@ -66,7 +67,7 @@ def draw_realtime_bar_graph(frame, distances_cm, point_names, colors, position='
     
     if position == 'bottom':
         # 하단에 그래프 영역 추가
-        graph_height = 250
+        graph_height = 280  # 조정 가이드를 위해 높이 증가
         graph_width = w
         graph_frame = np.zeros((graph_height, graph_width, 3), dtype=np.uint8)
         graph_frame[:] = (40, 40, 40)  # 어두운 배경
@@ -79,26 +80,68 @@ def draw_realtime_bar_graph(frame, distances_cm, point_names, colors, position='
         
         # 최대값 찾기 (스케일링용)
         if distances_cm and len(distances_cm) > 0 and all(d is not None for d in distances_cm):
-            max_distance = max(distances_cm) if max(distances_cm) > 0 else 5.0
+            # 평균값 계산
+            avg_distance = sum(distances_cm) / len(distances_cm)
+            max_distance = max(distances_cm)
             min_distance = min(distances_cm)
-            range_distance = max_distance - min_distance if max_distance > min_distance else 1.0
             
-            # Y축 범위 설정 (약간의 여유 추가)
-            y_max = max_distance + range_distance * 0.2
-            y_min = max(0, min_distance - range_distance * 0.1)
-            y_range = y_max - y_min if y_max > y_min else 1.0
+            # 고정 스케일: 평균값 ±20% 범위 (실제 차이를 정확히 보여줌)
+            y_center = avg_distance
+            y_range = avg_distance * 0.4  # ±20%
+            y_max = y_center + y_range / 2
+            y_min = max(0, y_center - y_range / 2)
             
             graph_max_height = graph_height - 80  # 그래프 최대 높이
             graph_bottom = graph_height - 30  # 그래프 바닥
             
             # 제목
-            cv2.putText(graph_frame, "Real-time Distance Bar Graph", 
-                       (graph_width // 2 - 200, 30), cv2.FONT_HERSHEY_SIMPLEX, 
-                       0.8, (255, 255, 255), 2)
+            cv2.putText(graph_frame, "Real-time Distance Bar Graph (Fixed Scale)", 
+                       (graph_width // 2 - 250, 30), cv2.FONT_HERSHEY_SIMPLEX, 
+                       0.7, (255, 255, 255), 2)
+            
+            # 평균값과 편차 정보 표시
+            max_diff = max_distance - avg_distance
+            min_diff = min_distance - avg_distance
+            max_deviation = max(abs(max_diff), abs(min_diff))
+            
+            info_text = f"Average: {avg_distance:.2f}cm | Max Deviation: {max_deviation*10:.1f}mm"
+            cv2.putText(graph_frame, info_text, 
+                       (graph_width // 2 - 180, 55), cv2.FONT_HERSHEY_SIMPLEX, 
+                       0.5, (200, 200, 200), 1)
             
             # 기준선 그리기
             cv2.line(graph_frame, (margin, graph_bottom), 
                     (graph_width - margin, graph_bottom), (150, 150, 150), 2)
+            
+            # 평균 기준선 그리기 (녹색 점선)
+            avg_normalized = (avg_distance - y_min) / y_range
+            avg_y_pos = int(graph_bottom - (graph_max_height * avg_normalized))
+            
+            # 점선으로 평균선 그리기
+            for x in range(margin, graph_width - margin, 20):
+                cv2.line(graph_frame, (x, avg_y_pos), (x + 10, avg_y_pos), (0, 255, 0), 2)
+            
+            # 평균선 레이블
+            cv2.putText(graph_frame, f"AVG: {avg_distance:.2f}cm", 
+                       (margin - 95, avg_y_pos + 5), cv2.FONT_HERSHEY_SIMPLEX, 
+                       0.45, (0, 255, 0), 1)
+            
+            # 허용 오차 영역 표시 (±1mm = ±0.1cm)
+            tolerance_cm = 0.1  # 1mm
+            tolerance_upper = avg_distance + tolerance_cm
+            tolerance_lower = avg_distance - tolerance_cm
+            
+            if y_min <= tolerance_lower <= y_max:
+                tol_lower_normalized = (tolerance_lower - y_min) / y_range
+                tol_lower_y = int(graph_bottom - (graph_max_height * tol_lower_normalized))
+                for x in range(margin, graph_width - margin, 15):
+                    cv2.line(graph_frame, (x, tol_lower_y), (x + 7, tol_lower_y), (0, 200, 200), 1)
+            
+            if y_min <= tolerance_upper <= y_max:
+                tol_upper_normalized = (tolerance_upper - y_min) / y_range
+                tol_upper_y = int(graph_bottom - (graph_max_height * tol_upper_normalized))
+                for x in range(margin, graph_width - margin, 15):
+                    cv2.line(graph_frame, (x, tol_upper_y), (x + 7, tol_upper_y), (0, 200, 200), 1)
             
             # Y축 눈금 표시 (5단계)
             for i in range(6):
@@ -120,10 +163,20 @@ def draw_realtime_bar_graph(frame, distances_cm, point_names, colors, position='
                 if distance is not None and distance > 0:
                     # 막대 위치 계산
                     x_start = margin + i * (bar_width + bar_spacing) + bar_spacing
+                    x_center = x_start + bar_width // 2
                     
                     # 막대 높이 계산 (정규화)
                     normalized_height = (distance - y_min) / y_range
                     bar_height = int(graph_max_height * normalized_height)
+                    
+                    # 평균 대비 차이 계산
+                    diff_from_avg = distance - avg_distance
+                    diff_mm = diff_from_avg * 10  # cm → mm
+                    
+                    # 막대 색상 (평균 ±1mm 이내면 녹색 테두리)
+                    is_aligned = abs(diff_mm) <= 1.0
+                    border_color = (0, 255, 0) if is_aligned else (255, 255, 255)
+                    border_thickness = 3 if is_aligned else 2
                     
                     # 막대 그리기
                     y_start = graph_bottom - bar_height
@@ -136,16 +189,47 @@ def draw_realtime_bar_graph(frame, distances_cm, point_names, colors, position='
                     cv2.rectangle(graph_frame, 
                                 (x_start, y_start), 
                                 (x_start + bar_width, graph_bottom), 
-                                (255, 255, 255), 2)
+                                border_color, border_thickness)
                     
                     # 거리 값 표시 (막대 위)
                     text = f"{distance:.2f}cm"
                     text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]
                     text_x = x_start + (bar_width - text_size[0]) // 2
-                    text_y = y_start - 10 if y_start > 30 else y_start + 20
+                    text_y = y_start - 35 if y_start > 50 else y_start + 20
                     cv2.putText(graph_frame, text, 
                                (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 
                                0.5, (255, 255, 255), 2)
+                    
+                    # 평균 대비 조정량 표시 (화살표 + 값)
+                    if abs(diff_mm) > 0.1:  # 0.1mm 이상 차이나면 표시
+                        arrow_color = (0, 255, 255)  # 노란색
+                        if diff_mm > 0:
+                            # 평균보다 높음 -> 내려야 함
+                            arrow_text = f"DOWN {abs(diff_mm):.1f}mm"
+                            arrow_symbol = "↓"
+                        else:
+                            # 평균보다 낮음 -> 올려야 함
+                            arrow_text = f"UP {abs(diff_mm):.1f}mm"
+                            arrow_symbol = "↑"
+                        
+                        # 화살표와 조정량
+                        adj_text_size = cv2.getTextSize(arrow_text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)[0]
+                        adj_text_x = x_start + (bar_width - adj_text_size[0]) // 2
+                        adj_text_y = y_start - 15 if y_start > 50 else y_start + 35
+                        
+                        cv2.putText(graph_frame, arrow_text, 
+                                   (adj_text_x, adj_text_y), cv2.FONT_HERSHEY_SIMPLEX, 
+                                   0.45, arrow_color, 2)
+                        
+                        # 큰 화살표 표시
+                        cv2.putText(graph_frame, arrow_symbol, 
+                                   (x_center - 8, text_y - 15 if y_start > 50 else text_y + 35), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, arrow_color, 2)
+                    else:
+                        # 정렬됨 표시
+                        cv2.putText(graph_frame, "OK", 
+                                   (x_center - 15, text_y - 15 if y_start > 50 else text_y + 35), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
                     
                     # 점 이름 (막대 아래)
                     name_size = cv2.getTextSize(name, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)[0]
@@ -162,6 +246,135 @@ def draw_realtime_bar_graph(frame, distances_cm, point_names, colors, position='
         
         # 프레임에 그래프 추가
         combined_frame = np.vstack([frame, graph_frame])
+        return combined_frame
+    
+    elif position == 'right':
+        # 오른쪽에 세로 막대그래프 영역 추가
+        graph_width = 350  # 좁은 폭
+        graph_height = h
+        graph_frame = np.zeros((graph_height, graph_width, 3), dtype=np.uint8)
+        graph_frame[:] = (35, 35, 35)  # 어두운 배경
+        
+        if distances_cm and len(distances_cm) > 0 and all(d is not None for d in distances_cm):
+            # 평균값 계산
+            avg_distance = sum(distances_cm) / len(distances_cm)
+            max_distance = max(distances_cm)
+            min_distance = min(distances_cm)
+            
+            # 고정 스케일: 평균값 ±20% 범위
+            y_center = avg_distance
+            y_range = avg_distance * 0.4
+            y_max = y_center + y_range / 2
+            y_min = max(0, y_center - y_range / 2)
+            
+            # 그래프 영역 설정
+            margin_top = 100
+            margin_bottom = 80
+            margin_side = 40
+            graph_area_height = graph_height - margin_top - margin_bottom
+            
+            # 제목 (작게)
+            cv2.putText(graph_frame, "Bar Graph", 
+                       (graph_width // 2 - 50, 30), cv2.FONT_HERSHEY_SIMPLEX, 
+                       0.6, (255, 255, 255), 2)
+            
+            # 평균값과 편차 정보 (작게)
+            max_diff = max_distance - avg_distance
+            min_diff = min_distance - avg_distance
+            max_deviation = max(abs(max_diff), abs(min_diff))
+            
+            cv2.putText(graph_frame, f"Avg: {avg_distance:.2f}cm", 
+                       (margin_side, 55), cv2.FONT_HERSHEY_SIMPLEX, 
+                       0.45, (200, 200, 200), 1)
+            cv2.putText(graph_frame, f"Dev: {max_deviation*10:.1f}mm", 
+                       (margin_side, 75), cv2.FONT_HERSHEY_SIMPLEX, 
+                       0.45, (200, 200, 200), 1)
+            
+            # 막대 영역
+            bar_height = graph_area_height // 5
+            bar_spacing = bar_height // 3
+            bar_max_width = graph_width - 2 * margin_side - 80  # 왼쪽에 레이블 공간
+            
+            # 세로로 3개 막대 그리기
+            for i, (distance, name, color) in enumerate(zip(distances_cm, point_names, colors)):
+                if distance is not None and distance > 0:
+                    y_pos = margin_top + i * (bar_height + bar_spacing)
+                    
+                    # 평균 대비 차이 계산
+                    diff_from_avg = distance - avg_distance
+                    diff_mm = diff_from_avg * 10
+                    
+                    # 정렬 여부
+                    is_aligned = abs(diff_mm) <= 1.0
+                    border_color = (0, 255, 0) if is_aligned else (255, 255, 255)
+                    
+                    # 막대 폭 계산 (정규화)
+                    normalized_width = (distance - y_min) / y_range
+                    bar_width_val = int(bar_max_width * normalized_width)
+                    
+                    x_start = margin_side + 60  # 레이블 공간
+                    
+                    # 막대 그리기
+                    cv2.rectangle(graph_frame,
+                                (x_start, y_pos),
+                                (x_start + bar_width_val, y_pos + bar_height),
+                                color, -1)
+                    
+                    # 막대 테두리
+                    cv2.rectangle(graph_frame,
+                                (x_start, y_pos),
+                                (x_start + bar_width_val, y_pos + bar_height),
+                                border_color, 2)
+                    
+                    # 점 이름 (왼쪽, 간결하게)
+                    short_name = f"P{i+1}"
+                    cv2.putText(graph_frame, short_name,
+                               (margin_side, y_pos + bar_height // 2 + 5),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+                    
+                    # 거리 값 (막대 안 또는 오른쪽)
+                    dist_text = f"{distance:.2f}"
+                    cv2.putText(graph_frame, dist_text,
+                               (x_start + 5, y_pos + bar_height // 2 + 5),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+                    
+                    # 조정 가이드 (아래)
+                    if abs(diff_mm) > 0.1:
+                        if diff_mm > 0:
+                            guide_text = f"↓{abs(diff_mm):.1f}mm"
+                            guide_color = (0, 200, 255)
+                        else:
+                            guide_text = f"↑{abs(diff_mm):.1f}mm"
+                            guide_color = (0, 255, 255)
+                        
+                        cv2.putText(graph_frame, guide_text,
+                                   (x_start + bar_width_val + 5, y_pos + bar_height // 2 + 5),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, guide_color, 1)
+                    else:
+                        cv2.putText(graph_frame, "OK",
+                                   (x_start + bar_width_val + 5, y_pos + bar_height // 2 + 5),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
+            
+            # Y축 스케일 표시 (하단)
+            scale_y = graph_height - margin_bottom + 20
+            cv2.putText(graph_frame, f"Scale: {y_min:.1f} ~ {y_max:.1f} cm",
+                       (margin_side, scale_y),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.35, (150, 150, 150), 1)
+            
+            # 평균선 표시 (세로선)
+            avg_normalized = (avg_distance - y_min) / y_range
+            avg_x = int(x_start + bar_max_width * avg_normalized)
+            for y in range(margin_top, graph_height - margin_bottom, 15):
+                cv2.line(graph_frame, (avg_x, y), (avg_x, y + 7), (0, 255, 0), 1)
+            
+        else:
+            # 데이터가 없을 때
+            cv2.putText(graph_frame, "Waiting...",
+                       (graph_width // 2 - 50, graph_height // 2),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (150, 150, 150), 1)
+        
+        # 프레임에 그래프 추가 (오른쪽)
+        combined_frame = np.hstack([frame, graph_frame])
         return combined_frame
     
     return frame
@@ -500,7 +713,7 @@ def save_measurement_log():
 def main():
     global FIXED_Z_DISTANCE, focal_length
     global selected_points, tracked_points, tracking_active
-    global measurement_active, last_measurement_time, measurement_log, show_bar_graph
+    global measurement_active, last_measurement_time, measurement_log, show_bar_graph, bar_graph_position
     
     # Z축 거리 설정
     print("[INFO] Z축 거리 설정...")
@@ -615,8 +828,10 @@ def main():
     # 창 생성 (막대그래프를 위한 공간 추가)
     window_name = "Fixed Z-Axis Distance Tracker"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-    if show_bar_graph:
-        cv2.resizeWindow(window_name, 1280, 970)  # 720 + 250 (그래프 영역)
+    if show_bar_graph and bar_graph_position == 'right':
+        cv2.resizeWindow(window_name, 1630, 720)  # 1280 + 350 (오른쪽 그래프)
+    elif show_bar_graph and bar_graph_position == 'bottom':
+        cv2.resizeWindow(window_name, 1280, 1000)  # 720 + 280 (하단 그래프)
     else:
         cv2.resizeWindow(window_name, 1280, 720)
     cv2.setMouseCallback(window_name, mouse_callback)
@@ -628,9 +843,15 @@ def main():
     print("\n사용법:")
     print("  1. 마우스로 3점을 클릭하여 선택")
     print("  2. 자동으로 실시간 추적 및 측정 시작 (1초마다 자동 기록)")
-    print("  3. 카메라를 좌우로 움직이면 각 점과의 거리가 실시간으로 표시됩니다")
-    print("  4. 오른쪽 상단에서 3점의 정렬 상태를 실시간으로 확인할 수 있습니다")
+    print("  3. 오른쪽 막대그래프에서 평형 조정 가이드를 확인하세요")
+    print("  4. 화면 오른쪽 상단에서 3점의 정렬 상태를 확인할 수 있습니다")
     print("  5. 's' 키를 눌러 측정 데이터를 CSV 파일로 저장")
+    print("\n오른쪽 막대그래프 기능:")
+    print("  - 고정 스케일: 평균값 ±20% 범위로 실제 차이를 정확히 표시")
+    print("  - 평균 기준선: 녹색 점선 (세로선)")
+    print("  - 조정 가이드: 각 점의 ↑UP/↓DOWN 방향과 조정량(mm) 표시")
+    print("  - 정렬 완료: 막대 테두리가 녹색으로 변경 + 'OK' 표시")
+    print("  - Avg: 3점의 평균 거리 / Dev: 최대 편차")
     print("\n정렬 측정 항목:")
     print("  - Z-axis range: 3점의 Z축 편차 (1mm 이하면 녹색)")
     print("  - Collinearity: 3점의 일직선 정도 (0.05 이하면 녹색)")
@@ -644,7 +865,11 @@ def main():
     print("  'z' - Z축 거리 재설정")
     print("  'q' - 종료 (자동으로 데이터 저장)")
     print("="*70)
-    print("\n💡 팁: 3점 선택 후 자동으로 측정이 시작되며, 화면 하단에 막대그래프가 표시됩니다!")
+    print("\n💡 평형 조정 방법:")
+    print("  1. 오른쪽 막대그래프에서 '↑UP' 또는 '↓DOWN' 가이드 확인")
+    print("  2. 표시된 mm 값만큼 모터 위치 조정")
+    print("  3. 막대 테두리가 녹색으로 변하고 'OK'가 표시되면 완료!")
+    print("  4. 'Dev' (최대 편차)가 1.0mm 이하가 되도록 조정하세요")
     print("="*70 + "\n")
     
     # EMA 필터 (부드러운 출력)
@@ -776,22 +1001,12 @@ def main():
                     'distance': ema_distances[i] * 100
                 })
                 
-                # 화면에 표시
-                y_offset = 180 + i * 130
-                cv2.putText(frame, f"=== {point_names[i]} ===", 
-                           (20, y_offset), FONT, 0.7, color, 2)
-                cv2.putText(frame, f"X: {X*100:+.2f}cm  Y: {Y*100:+.2f}cm  Z: {Z*100:.2f}cm", 
-                           (20, y_offset + 30), FONT, 0.6, color, 1)
-                cv2.putText(frame, f"Distance: {ema_distances[i]*100:.2f}cm ({ema_distances[i]*1000:.1f}mm)", 
-                           (20, y_offset + 60), FONT, 0.7, color, 2)
-                
-                # 초기 위치로부터의 변화량
-                if i < len(selected_points):
-                    initial_point = selected_points[i]
-                    dx = (point[0] - initial_point[0])
-                    dy = (point[1] - initial_point[1])
-                    cv2.putText(frame, f"Pixel shift: X{dx:+.0f}px Y{dy:+.0f}px", 
-                               (20, y_offset + 90), FONT, 0.5, color, 1)
+                # 화면에 간결하게 표시 (오른쪽 그래프가 자세한 정보 표시)
+                y_offset = 180 + i * 80  # 간격 축소
+                cv2.putText(frame, f"{point_names[i]}: {ema_distances[i]*100:.2f}cm", 
+                           (20, y_offset), FONT, 0.6, color, 2)
+                cv2.putText(frame, f"XYZ: ({X*100:+.1f}, {Y*100:+.1f}, {Z*100:.1f})", 
+                           (20, y_offset + 25), FONT, 0.45, color, 1)
         
         # 그래프 데이터 업데이트 (그래프가 활성화된 경우)
         if graph_enabled and len(tracked_points) == 3 and len(ema_distances) == 3:
@@ -882,7 +1097,7 @@ def main():
         if show_bar_graph and tracking_active and len(ema_distances) == 3:
             if all(d is not None for d in ema_distances):
                 distances_cm = [d * 100 for d in ema_distances]  # m → cm
-                frame = draw_realtime_bar_graph(frame, distances_cm, point_names, colors, position='bottom')
+                frame = draw_realtime_bar_graph(frame, distances_cm, point_names, colors, position=bar_graph_position)
         
         # 화면 표시
         cv2.imshow(window_name, frame)
