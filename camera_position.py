@@ -152,7 +152,7 @@ def calculate_alignment_metrics(points_3d):
 
 def mouse_callback(event, x, y, flags, param):
     """마우스 클릭으로 3점 선택"""
-    global selected_points, tracked_points, tracking_active
+    global selected_points, tracked_points, tracking_active, measurement_active, last_measurement_time
     
     if event == cv2.EVENT_LBUTTONDOWN and not tracking_active:
         if len(selected_points) < 3:
@@ -162,7 +162,9 @@ def mouse_callback(event, x, y, flags, param):
             
             if len(selected_points) == 3:
                 tracking_active = True
-                print("[INFO] 3점 선택 완료! 실시간 추적 시작")
+                measurement_active = True  # 자동으로 측정 시작
+                last_measurement_time = time.time()
+                print("[INFO] 3점 선택 완료! 실시간 추적 및 측정 자동 시작")
 
 def track_points_optical_flow(prev_gray, curr_gray, points):
     """
@@ -295,13 +297,18 @@ def create_realtime_graph():
     print("[INFO] 그래프 창이 닫혔습니다.")
 
 def start_graph_thread():
-    """그래프를 별도 스레드에서 실행"""
+    """그래프를 별도 스레드에서 실행 (Linux/Raspberry Pi에서 제한적 지원)"""
     global graph_enabled, graph_start_time
     global graph_data_time, graph_data_p1, graph_data_p2, graph_data_p3
     
     if graph_enabled:
         print("[WARNING] 그래프가 이미 실행 중입니다.")
         return
+    
+    # matplotlib 스레드 안전성 경고
+    print("[WARNING] matplotlib 그래프는 메인 스레드 문제로 인해 제한적으로 작동할 수 있습니다.")
+    print("[INFO] 대신 's' 키를 눌러 CSV 파일로 저장 후, 별도로 그래프를 그리는 것을 권장합니다.")
+    print("[INFO] 그래프 기능을 시도합니다...")
     
     # 그래프 데이터 초기화
     graph_start_time = time.time()
@@ -312,14 +319,28 @@ def start_graph_thread():
         graph_data_p3.clear()
     
     graph_enabled = True
-    graph_thread = threading.Thread(target=create_realtime_graph, daemon=True)
-    graph_thread.start()
-    print("[INFO] 실시간 그래프 시작 (별도 창)")
+    
+    # 스레드 대신 별도 프로세스 사용 시도
+    try:
+        graph_thread = threading.Thread(target=create_realtime_graph, daemon=True)
+        graph_thread.start()
+        print("[INFO] 실시간 그래프 시작 (별도 창)")
+    except Exception as e:
+        print(f"[ERROR] 그래프 시작 실패: {e}")
+        print("[INFO] CSV 저장 기능('s' 키)을 사용하세요.")
+        graph_enabled = False
 
 def save_measurement_log():
     """측정 기록을 CSV 파일로 저장"""
     if not measurement_log:
+        print("\n" + "="*70)
         print("[INFO] 저장할 측정 데이터가 없습니다.")
+        print("\n측정 데이터를 저장하는 방법:")
+        print("  1. 화면에서 마우스로 3점을 클릭하세요")
+        print("  2. 3점 선택 후 자동으로 1초마다 측정이 시작됩니다")
+        print("  3. 측정이 진행되는 동안 's' 키를 눌러 저장하세요")
+        print("  4. 또는 'm' 키로 측정을 시작/중지할 수 있습니다")
+        print("="*70 + "\n")
         return
     
     filename = f"distance_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
@@ -348,7 +369,12 @@ def save_measurement_log():
             
             f.write("\n")
     
-    print(f"[INFO] 측정 데이터 저장: {filename} ({len(measurement_log)}개 기록)")
+    print("\n" + "="*70)
+    print(f"✓ 측정 데이터 저장 완료!")
+    print(f"  파일명: {filename}")
+    print(f"  기록 수: {len(measurement_log)}개")
+    print(f"  3점 거리 데이터 (X, Y, Z 좌표 및 정렬 상태 포함)")
+    print("="*70 + "\n")
 
 def main():
     global FIXED_Z_DISTANCE, focal_length
@@ -477,21 +503,23 @@ def main():
     print(f"\n설정: Z축 고정 거리 = {FIXED_Z_DISTANCE*100:.1f}cm")
     print("\n사용법:")
     print("  1. 마우스로 3점을 클릭하여 선택")
-    print("  2. 자동으로 실시간 추적 시작")
+    print("  2. 자동으로 실시간 추적 및 측정 시작 (1초마다 자동 기록)")
     print("  3. 카메라를 좌우로 움직이면 각 점과의 거리가 실시간으로 표시됩니다")
-    print("  4. 'm' 키를 누르면 1초 단위로 거리 측정 시작 (다시 'm' 키로 중지)")
-    print("  5. 오른쪽 상단에서 3점의 정렬 상태를 실시간으로 확인할 수 있습니다")
+    print("  4. 오른쪽 상단에서 3점의 정렬 상태를 실시간으로 확인할 수 있습니다")
+    print("  5. 's' 키를 눌러 측정 데이터를 CSV 파일로 저장")
     print("\n정렬 측정 항목:")
     print("  - Z-axis range: 3점의 Z축 편차 (1mm 이하면 녹색)")
     print("  - Collinearity: 3점의 일직선 정도 (0.05 이하면 녹색)")
     print("  - Status: ALIGNED (녹색 체크) 또는 NOT ALIGNED (빨간색 X)")
     print("\n단축키:")
-    print("  'g' - 실시간 그래프 표시 (3점의 거리 vs 시간)")
-    print("  'm' - 1초 단위 측정 시작/중지")
+    print("  'm' - 측정 시작/중지 (기본: 자동 시작)")
+    print("  's' - 측정 데이터를 CSV 파일로 저장 (중요!)")
+    print("  'g' - 실시간 그래프 표시 (3점의 거리 vs 시간, 제한적)")
     print("  'r' - 점 선택 초기화 (다시 선택)")
     print("  'z' - Z축 거리 재설정")
-    print("  's' - 측정 데이터를 CSV 파일로 저장")
-    print("  'q' - 종료")
+    print("  'q' - 종료 (자동으로 데이터 저장)")
+    print("="*70)
+    print("\n💡 팁: 3점 선택 후 자동으로 측정이 시작되며, 종료 시 자동 저장됩니다!")
     print("="*70 + "\n")
     
     # EMA 필터 (부드러운 출력)
@@ -556,22 +584,26 @@ def main():
             
             # 측정 상태 표시
             if measurement_active:
-                cv2.putText(frame, f"[MEASURING] Recording every 1 sec ({len(measurement_log)} records)", 
-                           (20, 90), FONT, 0.7, (0, 0, 255), 2)
-                # 깜박이는 효과
+                cv2.putText(frame, f"[AUTO MEASURING] Recording every 1 sec ({len(measurement_log)} records)", 
+                           (20, 90), FONT, 0.7, (0, 255, 0), 2)
+                # 깜박이는 효과 (녹색)
                 if int(current_time * 2) % 2 == 0:
-                    cv2.circle(frame, (w_img - 30, 30), 15, (0, 0, 255), -1)
+                    cv2.circle(frame, (w_img - 30, 30), 15, (0, 255, 0), -1)
+                    cv2.putText(frame, "REC", (w_img - 80, 40), FONT, 0.6, (0, 255, 0), 2)
+                # 저장 안내
+                cv2.putText(frame, "[Press 'S' to save data to CSV]", 
+                           (20, 120), FONT, 0.6, (0, 255, 255), 2)
             else:
-                cv2.putText(frame, "[Press 'M' to start measuring]", 
-                           (20, 90), FONT, 0.6, (200, 200, 200), 1)
+                cv2.putText(frame, "[Paused - Press 'M' to resume measuring]", 
+                           (20, 90), FONT, 0.6, (0, 165, 255), 2)
             
-            # 그래프 상태 표시
+            # 그래프 상태 표시 (위치 조정)
             if graph_enabled:
-                cv2.putText(frame, "[Graph: ON] Press 'G' to restart", 
-                           (20, 120), FONT, 0.6, (0, 255, 255), 1)
+                cv2.putText(frame, "[Graph: ON]", 
+                           (20, 150), FONT, 0.5, (0, 255, 255), 1)
             else:
-                cv2.putText(frame, "[Press 'G' for real-time graph]", 
-                           (20, 120), FONT, 0.6, (200, 200, 200), 1)
+                cv2.putText(frame, "[Press 'G' for graph]", 
+                           (20, 150), FONT, 0.5, (200, 200, 200), 1)
         
         # 선택된/추적 중인 점들 표시 및 거리 계산
         colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255)]
@@ -617,7 +649,7 @@ def main():
                 })
                 
                 # 화면에 표시
-                y_offset = 150 + i * 130
+                y_offset = 180 + i * 130
                 cv2.putText(frame, f"=== {point_names[i]} ===", 
                            (20, y_offset), FONT, 0.7, color, 2)
                 cv2.putText(frame, f"X: {X*100:+.2f}cm  Y: {Y*100:+.2f}cm  Z: {Z*100:.2f}cm", 
@@ -707,13 +739,16 @@ def main():
                 })
                 last_measurement_time = current_time
                 
-                # 콘솔 출력
-                align_status = "ALIGNED" if (alignment_info and alignment_info['is_aligned']) else "NOT ALIGNED"
-                print(f"[MEASUREMENT] {timestamp} - "
-                      f"P1: {current_measurements[0]['distance']:.2f}cm, "
-                      f"P2: {current_measurements[1]['distance']:.2f}cm, "
-                      f"P3: {current_measurements[2]['distance']:.2f}cm - "
-                      f"{align_status}")
+                # 콘솔 출력 (개선된 포맷)
+                align_status = "✓ ALIGNED" if (alignment_info and alignment_info['is_aligned']) else "✗ NOT ALIGNED"
+                z_range_mm = alignment_info['z_range'] * 1000 if alignment_info else 0
+                
+                print(f"\n[기록 #{len(measurement_log)}] {timestamp}")
+                print(f"  Point 1: {current_measurements[0]['distance']:.2f}cm")
+                print(f"  Point 2: {current_measurements[1]['distance']:.2f}cm")
+                print(f"  Point 3: {current_measurements[2]['distance']:.2f}cm")
+                print(f"  Z-range: {z_range_mm:.2f}mm | Status: {align_status}")
+                print(f"  (총 {len(measurement_log)}개 측정 완료, 's' 키로 저장)")
         
         # 화면 표시
         cv2.imshow(window_name, frame)
@@ -732,9 +767,14 @@ def main():
                 measurement_active = not measurement_active
                 if measurement_active:
                     last_measurement_time = current_time
-                    print("[INFO] 1초 단위 측정 시작")
+                    print("\n" + "="*70)
+                    print("[INFO] ✓ 측정 재개 - 1초마다 자동 기록 중...")
+                    print("="*70)
                 else:
-                    print(f"[INFO] 측정 중지 (총 {len(measurement_log)}개 기록)")
+                    print("\n" + "="*70)
+                    print(f"[INFO] ⏸ 측정 일시정지 (현재 {len(measurement_log)}개 기록)")
+                    print("      다시 'm' 키를 누르면 측정이 재개됩니다")
+                    print("="*70)
             else:
                 print("[WARNING] 먼저 3점을 선택해주세요!")
         elif key == ord('s') or key == ord('S'):
@@ -754,7 +794,10 @@ def main():
             measurement_active = False
             ema_distances = [None, None, None]
             prev_gray = None
-            print("[INFO] 점 선택 초기화")
+            print("\n" + "="*70)
+            print("[INFO] 🔄 점 선택 초기화 완료")
+            print("      다시 마우스로 3점을 클릭하세요")
+            print("="*70)
         elif key == ord('z'):
             # Z축 거리 재설정
             z_input = get_z_distance_input()
