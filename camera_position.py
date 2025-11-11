@@ -4,14 +4,19 @@ import time
 import tkinter as tk
 from tkinter import simpledialog
 from datetime import datetime
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+from collections import deque
+import threading
 
-# Raspberry Pi 카메라 지원
+# Raspberry Pi 카메라 지원 (레거시 picamera)
 try:
-    from picamera2 import Picamera2
+    from picamera import PiCamera
+    from picamera.array import PiRGBArray
     USE_PICAMERA = True
 except ImportError:
     USE_PICAMERA = False
-    print("[INFO] picamera2 not found, using standard camera")
+    print("[INFO] picamera not found, using standard camera")
 
 # ===== 설정 =====
 SOURCE = 0  # 0=웹캠
@@ -31,6 +36,15 @@ tracking_active = False
 measurement_active = False
 last_measurement_time = 0
 measurement_log = []  # 측정 기록 저장
+
+# 그래프 관련 변수
+graph_enabled = False
+graph_data_time = deque(maxlen=100)  # 최근 100개 데이터만 유지
+graph_data_p1 = deque(maxlen=100)
+graph_data_p2 = deque(maxlen=100)
+graph_data_p3 = deque(maxlen=100)
+graph_start_time = None
+graph_lock = threading.Lock()
 
 def get_z_distance_input():
     """Z축 거리 입력 받기"""
@@ -195,6 +209,114 @@ def track_points_optical_flow(prev_gray, curr_gray, points):
     
     return good_points
 
+def update_graph_data(distances_cm):
+    """
+    그래프 데이터 업데이트
+    
+    Args:
+        distances_cm: [dist1, dist2, dist3] (cm 단위)
+    """
+    global graph_data_time, graph_data_p1, graph_data_p2, graph_data_p3
+    global graph_start_time, graph_lock
+    
+    if graph_start_time is None:
+        graph_start_time = time.time()
+    
+    elapsed_time = time.time() - graph_start_time
+    
+    with graph_lock:
+        graph_data_time.append(elapsed_time)
+        graph_data_p1.append(distances_cm[0])
+        graph_data_p2.append(distances_cm[1])
+        graph_data_p3.append(distances_cm[2])
+
+def create_realtime_graph():
+    """실시간 그래프 창 생성 및 업데이트"""
+    global graph_enabled
+    
+    # matplotlib 설정
+    try:
+        plt.style.use('seaborn-v0_8-darkgrid')
+    except:
+        try:
+            plt.style.use('seaborn-darkgrid')
+        except:
+            pass  # 기본 스타일 사용
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    line1, = ax.plot([], [], 'b-', linewidth=2, label='Point 1', marker='o', markersize=3)
+    line2, = ax.plot([], [], 'g-', linewidth=2, label='Point 2', marker='s', markersize=3)
+    line3, = ax.plot([], [], 'r-', linewidth=2, label='Point 3', marker='^', markersize=3)
+    
+    ax.set_xlabel('Time (seconds)', fontsize=12)
+    ax.set_ylabel('Distance (cm)', fontsize=12)
+    ax.set_title('Real-time Distance Tracking (3 Points)', fontsize=14, fontweight='bold')
+    ax.legend(loc='upper right')
+    ax.grid(True, alpha=0.3)
+    
+    def init():
+        ax.set_xlim(0, 10)
+        ax.set_ylim(0, 10)
+        return line1, line2, line3
+    
+    def update(frame):
+        global graph_data_time, graph_data_p1, graph_data_p2, graph_data_p3
+        
+        with graph_lock:
+            if len(graph_data_time) > 0:
+                times = list(graph_data_time)
+                p1_data = list(graph_data_p1)
+                p2_data = list(graph_data_p2)
+                p3_data = list(graph_data_p3)
+                
+                line1.set_data(times, p1_data)
+                line2.set_data(times, p2_data)
+                line3.set_data(times, p3_data)
+                
+                # 축 범위 자동 조정
+                if len(times) > 0:
+                    ax.set_xlim(max(0, times[-1] - 30), times[-1] + 2)  # 최근 30초
+                    
+                    all_distances = p1_data + p2_data + p3_data
+                    if all_distances:
+                        min_dist = min(all_distances)
+                        max_dist = max(all_distances)
+                        margin = (max_dist - min_dist) * 0.1 or 1
+                        ax.set_ylim(min_dist - margin, max_dist + margin)
+        
+        return line1, line2, line3
+    
+    ani = FuncAnimation(fig, update, init_func=init, blit=True, interval=100, cache_frame_data=False)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    graph_enabled = False
+    print("[INFO] 그래프 창이 닫혔습니다.")
+
+def start_graph_thread():
+    """그래프를 별도 스레드에서 실행"""
+    global graph_enabled, graph_start_time
+    global graph_data_time, graph_data_p1, graph_data_p2, graph_data_p3
+    
+    if graph_enabled:
+        print("[WARNING] 그래프가 이미 실행 중입니다.")
+        return
+    
+    # 그래프 데이터 초기화
+    graph_start_time = time.time()
+    with graph_lock:
+        graph_data_time.clear()
+        graph_data_p1.clear()
+        graph_data_p2.clear()
+        graph_data_p3.clear()
+    
+    graph_enabled = True
+    graph_thread = threading.Thread(target=create_realtime_graph, daemon=True)
+    graph_thread.start()
+    print("[INFO] 실시간 그래프 시작 (별도 창)")
+
 def save_measurement_log():
     """측정 기록을 CSV 파일로 저장"""
     if not measurement_log:
@@ -250,33 +372,74 @@ def main():
     picam = None
     cap = None
     
+    # Raspberry Pi 카메라 시도 (레거시 picamera)
     if USE_PICAMERA:
         try:
-            print("[INFO] Raspberry Pi 카메라 모듈 사용")
-            picam = Picamera2()
-            config = picam.create_preview_configuration(
-                main={"size": (1280, 720), "format": "RGB888"}
-            )
-            picam.configure(config)
-            picam.start()
-            time.sleep(2)
+            print("[INFO] Raspberry Pi 카메라(picamera v2) 초기화 중...")
             
-            test_frame = picam.capture_array()
-            if test_frame is None:
-                print("[ERROR] 카메라에서 프레임을 읽을 수 없습니다!")
-                picam.stop()
-                return
+            picam = PiCamera()
+            picam.resolution = (1280, 720)
+            picam.framerate = 30
             
-            print(f"[INFO] 카메라 초기화 성공! 해상도: {test_frame.shape[1]}x{test_frame.shape[0]}")
+            print("[INFO] 카메라 워밍업 중... (2초)")
+            time.sleep(2)  # 카메라 워밍업
+            
+            # 테스트 프레임 캡처
+            raw_capture = PiRGBArray(picam, size=(1280, 720))
+            picam.capture(raw_capture, format="bgr", use_video_port=True)
+            test_frame = raw_capture.array
+            
+            if test_frame is not None and test_frame.size > 0:
+                h, w = test_frame.shape[:2]
+                print(f"[SUCCESS] Raspberry Pi 카메라 초기화 완료!")
+                print(f"  해상도: {w}x{h}")
+                print(f"  프레임레이트: {picam.framerate} fps")
+                print(f"  센서 모드: IMX219 (picamera v2)")
+            else:
+                print("[ERROR] 테스트 프레임 캡처 실패")
+                picam.close()
+                picam = None
+                
         except Exception as e:
             print(f"[ERROR] Raspberry Pi 카메라 초기화 실패: {e}")
-            return
-    else:
+            print(f"  오류 타입: {type(e).__name__}")
+            print("\n해결 방법:")
+            print("  1. 카메라 케이블 연결 확인")
+            print("  2. sudo raspi-config에서 Legacy Camera 활성화:")
+            print("     Interface Options -> Legacy Camera -> Enable")
+            print("  3. 재부팅: sudo reboot")
+            print("  4. picamera 설치: sudo apt install -y python3-picamera")
+            
+            if picam is not None:
+                try:
+                    picam.close()
+                except:
+                    pass
+            picam = None
+            print("[INFO] USB 카메라로 자동 전환합니다...\n")
+    
+    # USB 카메라 사용 (picamera가 없거나 실패한 경우)
+    if picam is None:
         print("[INFO] USB 카메라 사용")
         cap = cv2.VideoCapture(SOURCE)
         if not cap.isOpened():
-            print("[ERROR] 카메라를 열 수 없습니다!")
-            return
+            print("[ERROR] USB 카메라를 열 수 없습니다!")
+            print("[INFO] 다른 카메라 인덱스 시도 중...")
+            # 다른 카메라 인덱스 시도
+            for i in range(1, 4):
+                cap = cv2.VideoCapture(i)
+                if cap.isOpened():
+                    print(f"[INFO] 카메라 인덱스 {i}에서 카메라 발견!")
+                    break
+            
+            if not cap.isOpened():
+                print("[ERROR] 사용 가능한 카메라를 찾을 수 없습니다!")
+                print("\n해결 방법:")
+                print("1. Raspberry Pi 카메라를 사용하려면:")
+                print("   sudo raspi-config -> Interface Options -> Camera -> Enable")
+                print("2. USB 카메라가 제대로 연결되었는지 확인하세요:")
+                print("   ls /dev/video*")
+                return
         
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
@@ -292,7 +455,7 @@ def main():
             cap.release()
             return
         
-        print(f"[INFO] 카메라 초기화 성공! 해상도: {test_frame.shape[1]}x{test_frame.shape[0]}")
+        print(f"[INFO] USB 카메라 초기화 성공! 해상도: {test_frame.shape[1]}x{test_frame.shape[0]}")
     
     # 창 생성
     window_name = "Fixed Z-Axis Distance Tracker"
@@ -315,6 +478,7 @@ def main():
     print("  - Collinearity: 3점의 일직선 정도 (0.05 이하면 녹색)")
     print("  - Status: ALIGNED (녹색 체크) 또는 NOT ALIGNED (빨간색 X)")
     print("\n단축키:")
+    print("  'g' - 실시간 그래프 표시 (3점의 거리 vs 시간)")
     print("  'm' - 1초 단위 측정 시작/중지")
     print("  'r' - 점 선택 초기화 (다시 선택)")
     print("  'z' - Z축 거리 재설정")
@@ -331,11 +495,31 @@ def main():
     
     h_img, w_img = test_frame.shape[:2]
     
+    # Raspberry Pi 카메라용 스트리밍 설정
+    raw_capture = None
+    camera_stream = None
+    if picam is not None:
+        raw_capture = PiRGBArray(picam, size=(1280, 720))
+        camera_stream = picam.capture_continuous(raw_capture, format="bgr", use_video_port=True)
+        print("[INFO] Raspberry Pi 카메라 스트리밍 시작")
+    
     while True:
         # 프레임 읽기
-        if picam is not None:
-            frame = picam.capture_array()
-            if frame is None:
+        if picam is not None and camera_stream is not None:
+            try:
+                # 연속 캡처에서 프레임 가져오기
+                stream_frame = next(camera_stream)
+                frame = stream_frame.array
+                raw_capture.truncate(0)  # 버퍼 초기화
+                
+                if frame is None or frame.size == 0:
+                    time.sleep(0.01)
+                    continue
+            except StopIteration:
+                print("[ERROR] 카메라 스트림 종료")
+                break
+            except Exception as e:
+                print(f"[ERROR] 프레임 읽기 오류: {e}")
                 time.sleep(0.1)
                 continue
         else:
@@ -381,6 +565,14 @@ def main():
             else:
                 cv2.putText(frame, "[Press 'M' to start measuring]", 
                            (20, 90), FONT, 0.6, (200, 200, 200), 1)
+            
+            # 그래프 상태 표시
+            if graph_enabled:
+                cv2.putText(frame, "[Graph: ON] Press 'G' to restart", 
+                           (20, 120), FONT, 0.6, (0, 255, 255), 1)
+            else:
+                cv2.putText(frame, "[Press 'G' for real-time graph]", 
+                           (20, 120), FONT, 0.6, (200, 200, 200), 1)
         
         # 선택된/추적 중인 점들 표시 및 거리 계산
         colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255)]
@@ -426,7 +618,7 @@ def main():
                 })
                 
                 # 화면에 표시
-                y_offset = 120 + i * 130
+                y_offset = 150 + i * 130
                 cv2.putText(frame, f"=== {point_names[i]} ===", 
                            (20, y_offset), FONT, 0.7, color, 2)
                 cv2.putText(frame, f"X: {X*100:+.2f}cm  Y: {Y*100:+.2f}cm  Z: {Z*100:.2f}cm", 
@@ -442,6 +634,15 @@ def main():
                     cv2.putText(frame, f"Pixel shift: X{dx:+.0f}px Y{dy:+.0f}px", 
                                (20, y_offset + 90), FONT, 0.5, color, 1)
         
+<<<<<<< Current (Your changes)
+=======
+        # 그래프 데이터 업데이트 (그래프가 활성화된 경우)
+        if graph_enabled and len(tracked_points) == 3 and len(ema_distances) == 3:
+            if all(d is not None for d in ema_distances):
+                distances_cm = [d * 100 for d in ema_distances]  # m → cm
+                update_graph_data(distances_cm)
+        
+>>>>>>> Incoming (Background Agent changes)
         # 정렬 상태 측정 및 표시
         if len(points_3d) == 3:
             alignment = calculate_alignment_metrics(points_3d)
@@ -543,6 +744,12 @@ def main():
         elif key == ord('s') or key == ord('S'):
             # 측정 데이터 저장
             save_measurement_log()
+        elif key == ord('g') or key == ord('G'):
+            # 실시간 그래프 시작
+            if tracking_active:
+                start_graph_thread()
+            else:
+                print("[WARNING] 먼저 3점을 선택해주세요!")
         elif key == ord('r'):
             # 초기화
             selected_points = []
@@ -563,9 +770,14 @@ def main():
     
     # 리소스 정리
     if picam is not None:
-        picam.stop()
+        try:
+            picam.close()
+            print("[INFO] Raspberry Pi 카메라 종료")
+        except:
+            pass
     if cap is not None:
         cap.release()
+        print("[INFO] USB 카메라 종료")
     cv2.destroyAllWindows()
 
 if __name__ == "__main__":
