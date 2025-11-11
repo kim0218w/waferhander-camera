@@ -45,6 +45,127 @@ graph_data_p3 = deque(maxlen=100)
 graph_start_time = None
 graph_lock = threading.Lock()
 
+# 실시간 막대그래프 표시 설정
+show_bar_graph = True  # 기본적으로 막대그래프 표시
+
+def draw_realtime_bar_graph(frame, distances_cm, point_names, colors, position='bottom'):
+    """
+    OpenCV를 사용해 실시간 막대그래프를 프레임에 그리기
+    
+    Args:
+        frame: OpenCV 프레임
+        distances_cm: [dist1, dist2, dist3] 거리 리스트 (cm)
+        point_names: 점 이름 리스트
+        colors: 색상 리스트 (BGR)
+        position: 'bottom' 또는 'right' (그래프 위치)
+    
+    Returns:
+        그래프가 추가된 프레임
+    """
+    h, w = frame.shape[:2]
+    
+    if position == 'bottom':
+        # 하단에 그래프 영역 추가
+        graph_height = 250
+        graph_width = w
+        graph_frame = np.zeros((graph_height, graph_width, 3), dtype=np.uint8)
+        graph_frame[:] = (40, 40, 40)  # 어두운 배경
+        
+        # 그래프 영역 설정
+        margin = 100
+        bar_area_width = graph_width - 2 * margin
+        bar_width = bar_area_width // 6  # 3개 막대 + 간격
+        bar_spacing = bar_width // 2
+        
+        # 최대값 찾기 (스케일링용)
+        if distances_cm and len(distances_cm) > 0 and all(d is not None for d in distances_cm):
+            max_distance = max(distances_cm) if max(distances_cm) > 0 else 5.0
+            min_distance = min(distances_cm)
+            range_distance = max_distance - min_distance if max_distance > min_distance else 1.0
+            
+            # Y축 범위 설정 (약간의 여유 추가)
+            y_max = max_distance + range_distance * 0.2
+            y_min = max(0, min_distance - range_distance * 0.1)
+            y_range = y_max - y_min if y_max > y_min else 1.0
+            
+            graph_max_height = graph_height - 80  # 그래프 최대 높이
+            graph_bottom = graph_height - 30  # 그래프 바닥
+            
+            # 제목
+            cv2.putText(graph_frame, "Real-time Distance Bar Graph", 
+                       (graph_width // 2 - 200, 30), cv2.FONT_HERSHEY_SIMPLEX, 
+                       0.8, (255, 255, 255), 2)
+            
+            # 기준선 그리기
+            cv2.line(graph_frame, (margin, graph_bottom), 
+                    (graph_width - margin, graph_bottom), (150, 150, 150), 2)
+            
+            # Y축 눈금 표시 (5단계)
+            for i in range(6):
+                y_val = y_min + (y_range * i / 5)
+                y_pos = int(graph_bottom - (graph_max_height * i / 5))
+                cv2.line(graph_frame, (margin - 10, y_pos), 
+                        (margin, y_pos), (150, 150, 150), 1)
+                cv2.putText(graph_frame, f"{y_val:.1f}", 
+                           (margin - 70, y_pos + 5), cv2.FONT_HERSHEY_SIMPLEX, 
+                           0.4, (200, 200, 200), 1)
+            
+            # Y축 레이블
+            cv2.putText(graph_frame, "cm", 
+                       (margin - 80, 50), cv2.FONT_HERSHEY_SIMPLEX, 
+                       0.5, (200, 200, 200), 1)
+            
+            # 막대 그리기
+            for i, (distance, name, color) in enumerate(zip(distances_cm, point_names, colors)):
+                if distance is not None and distance > 0:
+                    # 막대 위치 계산
+                    x_start = margin + i * (bar_width + bar_spacing) + bar_spacing
+                    
+                    # 막대 높이 계산 (정규화)
+                    normalized_height = (distance - y_min) / y_range
+                    bar_height = int(graph_max_height * normalized_height)
+                    
+                    # 막대 그리기
+                    y_start = graph_bottom - bar_height
+                    cv2.rectangle(graph_frame, 
+                                (x_start, y_start), 
+                                (x_start + bar_width, graph_bottom), 
+                                color, -1)
+                    
+                    # 막대 테두리
+                    cv2.rectangle(graph_frame, 
+                                (x_start, y_start), 
+                                (x_start + bar_width, graph_bottom), 
+                                (255, 255, 255), 2)
+                    
+                    # 거리 값 표시 (막대 위)
+                    text = f"{distance:.2f}cm"
+                    text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]
+                    text_x = x_start + (bar_width - text_size[0]) // 2
+                    text_y = y_start - 10 if y_start > 30 else y_start + 20
+                    cv2.putText(graph_frame, text, 
+                               (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 
+                               0.5, (255, 255, 255), 2)
+                    
+                    # 점 이름 (막대 아래)
+                    name_size = cv2.getTextSize(name, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)[0]
+                    name_x = x_start + (bar_width - name_size[0]) // 2
+                    cv2.putText(graph_frame, name, 
+                               (name_x, graph_bottom + 25), cv2.FONT_HERSHEY_SIMPLEX, 
+                               0.6, color, 2)
+        
+        else:
+            # 데이터가 없을 때
+            cv2.putText(graph_frame, "Waiting for 3 points selection...", 
+                       (graph_width // 2 - 200, graph_height // 2), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (150, 150, 150), 2)
+        
+        # 프레임에 그래프 추가
+        combined_frame = np.vstack([frame, graph_frame])
+        return combined_frame
+    
+    return frame
+
 def get_z_distance_input():
     """Z축 거리 입력 받기"""
     root = tk.Tk()
@@ -379,7 +500,7 @@ def save_measurement_log():
 def main():
     global FIXED_Z_DISTANCE, focal_length
     global selected_points, tracked_points, tracking_active
-    global measurement_active, last_measurement_time, measurement_log
+    global measurement_active, last_measurement_time, measurement_log, show_bar_graph
     
     # Z축 거리 설정
     print("[INFO] Z축 거리 설정...")
@@ -491,10 +612,13 @@ def main():
         
         print(f"[INFO] USB 카메라 초기화 성공! 해상도: {test_frame.shape[1]}x{test_frame.shape[0]}")
     
-    # 창 생성
+    # 창 생성 (막대그래프를 위한 공간 추가)
     window_name = "Fixed Z-Axis Distance Tracker"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(window_name, 1280, 720)
+    if show_bar_graph:
+        cv2.resizeWindow(window_name, 1280, 970)  # 720 + 250 (그래프 영역)
+    else:
+        cv2.resizeWindow(window_name, 1280, 720)
     cv2.setMouseCallback(window_name, mouse_callback)
     
     print("\n" + "="*70)
@@ -514,12 +638,13 @@ def main():
     print("\n단축키:")
     print("  'm' - 측정 시작/중지 (기본: 자동 시작)")
     print("  's' - 측정 데이터를 CSV 파일로 저장 (중요!)")
-    print("  'g' - 실시간 그래프 표시 (3점의 거리 vs 시간, 제한적)")
+    print("  'b' - 실시간 막대그래프 ON/OFF (기본: ON)")
+    print("  'g' - 선 그래프 표시 (3점의 거리 vs 시간, 제한적)")
     print("  'r' - 점 선택 초기화 (다시 선택)")
     print("  'z' - Z축 거리 재설정")
     print("  'q' - 종료 (자동으로 데이터 저장)")
     print("="*70)
-    print("\n💡 팁: 3점 선택 후 자동으로 측정이 시작되며, 종료 시 자동 저장됩니다!")
+    print("\n💡 팁: 3점 선택 후 자동으로 측정이 시작되며, 화면 하단에 막대그래프가 표시됩니다!")
     print("="*70 + "\n")
     
     # EMA 필터 (부드러운 출력)
@@ -597,13 +722,16 @@ def main():
                 cv2.putText(frame, "[Paused - Press 'M' to resume measuring]", 
                            (20, 90), FONT, 0.6, (0, 165, 255), 2)
             
-            # 그래프 상태 표시 (위치 조정)
+            # 막대그래프 상태 표시
+            bar_status = "ON" if show_bar_graph else "OFF"
+            bar_color = (0, 255, 0) if show_bar_graph else (100, 100, 100)
+            cv2.putText(frame, f"[Bar Graph: {bar_status}]", 
+                       (20, 150), FONT, 0.5, bar_color, 1)
+            
+            # 선 그래프 상태 표시
             if graph_enabled:
-                cv2.putText(frame, "[Graph: ON]", 
-                           (20, 150), FONT, 0.5, (0, 255, 255), 1)
-            else:
-                cv2.putText(frame, "[Press 'G' for graph]", 
-                           (20, 150), FONT, 0.5, (200, 200, 200), 1)
+                cv2.putText(frame, "[Line Graph: ON]", 
+                           (20, 175), FONT, 0.5, (0, 255, 255), 1)
         
         # 선택된/추적 중인 점들 표시 및 거리 계산
         colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255)]
@@ -750,6 +878,12 @@ def main():
                 print(f"  Z-range: {z_range_mm:.2f}mm | Status: {align_status}")
                 print(f"  (총 {len(measurement_log)}개 측정 완료, 's' 키로 저장)")
         
+        # 실시간 막대그래프 추가
+        if show_bar_graph and tracking_active and len(ema_distances) == 3:
+            if all(d is not None for d in ema_distances):
+                distances_cm = [d * 100 for d in ema_distances]  # m → cm
+                frame = draw_realtime_bar_graph(frame, distances_cm, point_names, colors, position='bottom')
+        
         # 화면 표시
         cv2.imshow(window_name, frame)
         
@@ -780,8 +914,13 @@ def main():
         elif key == ord('s') or key == ord('S'):
             # 측정 데이터 저장
             save_measurement_log()
+        elif key == ord('b') or key == ord('B'):
+            # 막대그래프 ON/OFF
+            show_bar_graph = not show_bar_graph
+            status = "ON" if show_bar_graph else "OFF"
+            print(f"\n[INFO] 📊 실시간 막대그래프: {status}")
         elif key == ord('g') or key == ord('G'):
-            # 실시간 그래프 시작
+            # 실시간 선 그래프 시작
             if tracking_active:
                 start_graph_thread()
             else:
