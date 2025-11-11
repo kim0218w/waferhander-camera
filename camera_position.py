@@ -9,14 +9,13 @@ from matplotlib.animation import FuncAnimation
 from collections import deque
 import threading
 
-# Raspberry Pi 카메라 지원 (레거시 picamera)
+# Raspberry Pi 카메라 지원 (picamera2)
 try:
-    from picamera import PiCamera
-    from picamera.array import PiRGBArray
-    USE_PICAMERA = True
+    from picamera2 import Picamera2
+    USE_PICAMERA2 = True
 except ImportError:
-    USE_PICAMERA = False
-    print("[INFO] picamera not found, using standard camera")
+    USE_PICAMERA2 = False
+    print("[INFO] picamera2 not found, using standard camera")   
 
 # ===== 설정 =====
 SOURCE = 0  # 0=웹캠
@@ -372,31 +371,38 @@ def main():
     picam = None
     cap = None
     
-    # Raspberry Pi 카메라 시도 (레거시 picamera)
-    if USE_PICAMERA:
+    # Raspberry Pi 카메라 시도 (picamera2)
+    if USE_PICAMERA2:
         try:
-            print("[INFO] Raspberry Pi 카메라(picamera v2) 초기화 중...")
+            print("[INFO] Raspberry Pi 카메라(picamera2) 초기화 중...")
             
-            picam = PiCamera()
-            picam.resolution = (1280, 720)
-            picam.framerate = 30
+            picam = Picamera2()
+            
+            # 비디오 설정 생성 (BGR888 포맷으로 OpenCV와 호환)
+            config = picam.create_video_configuration(
+                main={"size": (1280, 720), "format": "BGR888"},
+                controls={"FrameRate": 30}
+            )
+            picam.configure(config)
+            
+            # 카메라 시작
+            picam.start()
             
             print("[INFO] 카메라 워밍업 중... (2초)")
             time.sleep(2)  # 카메라 워밍업
             
             # 테스트 프레임 캡처
-            raw_capture = PiRGBArray(picam, size=(1280, 720))
-            picam.capture(raw_capture, format="bgr", use_video_port=True)
-            test_frame = raw_capture.array
+            test_frame = picam.capture_array()
             
             if test_frame is not None and test_frame.size > 0:
                 h, w = test_frame.shape[:2]
                 print(f"[SUCCESS] Raspberry Pi 카메라 초기화 완료!")
                 print(f"  해상도: {w}x{h}")
-                print(f"  프레임레이트: {picam.framerate} fps")
-                print(f"  센서 모드: IMX219 (picamera v2)")
+                print(f"  포맷: BGR888")
+                print(f"  라이브러리: picamera2")
             else:
                 print("[ERROR] 테스트 프레임 캡처 실패")
+                picam.stop()
                 picam.close()
                 picam = None
                 
@@ -405,13 +411,15 @@ def main():
             print(f"  오류 타입: {type(e).__name__}")
             print("\n해결 방법:")
             print("  1. 카메라 케이블 연결 확인")
-            print("  2. sudo raspi-config에서 Legacy Camera 활성화:")
-            print("     Interface Options -> Legacy Camera -> Enable")
-            print("  3. 재부팅: sudo reboot")
-            print("  4. picamera 설치: sudo apt install -y python3-picamera")
+            print("  2. libcamera가 설치되어 있는지 확인:")
+            print("     sudo apt install -y python3-picamera2")
+            print("  3. 카메라가 감지되는지 확인:")
+            print("     libcamera-hello --list-cameras")
+            print("  4. 재부팅: sudo reboot")
             
             if picam is not None:
                 try:
+                    picam.stop()
                     picam.close()
                 except:
                     pass
@@ -495,29 +503,20 @@ def main():
     
     h_img, w_img = test_frame.shape[:2]
     
-    # Raspberry Pi 카메라용 스트리밍 설정
-    raw_capture = None
-    camera_stream = None
+    # picamera2는 스트리밍 설정이 필요 없음 (이미 start()로 시작됨)
     if picam is not None:
-        raw_capture = PiRGBArray(picam, size=(1280, 720))
-        camera_stream = picam.capture_continuous(raw_capture, format="bgr", use_video_port=True)
-        print("[INFO] Raspberry Pi 카메라 스트리밍 시작")
+        print("[INFO] Raspberry Pi 카메라 스트리밍 준비 완료")
     
     while True:
         # 프레임 읽기
-        if picam is not None and camera_stream is not None:
+        if picam is not None:
             try:
-                # 연속 캡처에서 프레임 가져오기
-                stream_frame = next(camera_stream)
-                frame = stream_frame.array
-                raw_capture.truncate(0)  # 버퍼 초기화
+                # picamera2로 프레임 캡처 (BGR888 포맷)
+                frame = picam.capture_array()
                 
                 if frame is None or frame.size == 0:
                     time.sleep(0.01)
                     continue
-            except StopIteration:
-                print("[ERROR] 카메라 스트림 종료")
-                break
             except Exception as e:
                 print(f"[ERROR] 프레임 읽기 오류: {e}")
                 time.sleep(0.1)
@@ -634,15 +633,12 @@ def main():
                     cv2.putText(frame, f"Pixel shift: X{dx:+.0f}px Y{dy:+.0f}px", 
                                (20, y_offset + 90), FONT, 0.5, color, 1)
         
-<<<<<<< Current (Your changes)
-=======
         # 그래프 데이터 업데이트 (그래프가 활성화된 경우)
         if graph_enabled and len(tracked_points) == 3 and len(ema_distances) == 3:
             if all(d is not None for d in ema_distances):
                 distances_cm = [d * 100 for d in ema_distances]  # m → cm
                 update_graph_data(distances_cm)
         
->>>>>>> Incoming (Background Agent changes)
         # 정렬 상태 측정 및 표시
         if len(points_3d) == 3:
             alignment = calculate_alignment_metrics(points_3d)
@@ -771,6 +767,7 @@ def main():
     # 리소스 정리
     if picam is not None:
         try:
+            picam.stop()
             picam.close()
             print("[INFO] Raspberry Pi 카메라 종료")
         except:
