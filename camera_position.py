@@ -49,7 +49,7 @@ graph_lock = threading.Lock()
 show_bar_graph = True  # 기본적으로 막대그래프 표시
 bar_graph_position = 'right'  # 'bottom' 또는 'right' - 오른쪽에 작게 배치
 
-def draw_realtime_bar_graph(frame, distances_cm, point_names, colors, position='bottom'):
+def draw_realtime_bar_graph(frame, distances_cm, point_names, colors, position='bottom', z_values_cm=None):
     """
     OpenCV를 사용해 실시간 막대그래프를 프레임에 그리기
     
@@ -256,6 +256,13 @@ def draw_realtime_bar_graph(frame, distances_cm, point_names, colors, position='
         graph_frame[:] = (35, 35, 35)  # 어두운 배경
         
         if distances_cm and len(distances_cm) > 0 and all(d is not None for d in distances_cm):
+            # Z축 기준 계산
+            if z_values_cm and len(z_values_cm) == len(distances_cm):
+                # Z축 평균을 기준으로 사용
+                z_reference = sum(z_values_cm) / len(z_values_cm)
+            else:
+                z_reference = None
+            
             # 평균값 계산
             avg_distance = sum(distances_cm) / len(distances_cm)
             max_distance = max(distances_cm)
@@ -278,17 +285,26 @@ def draw_realtime_bar_graph(frame, distances_cm, point_names, colors, position='
                        (graph_width // 2 - 50, 30), cv2.FONT_HERSHEY_SIMPLEX, 
                        0.6, (255, 255, 255), 2)
             
-            # 평균값과 편차 정보 (작게)
-            max_diff = max_distance - avg_distance
-            min_diff = min_distance - avg_distance
-            max_deviation = max(abs(max_diff), abs(min_diff))
-            
-            cv2.putText(graph_frame, f"Avg: {avg_distance:.2f}cm", 
-                       (margin_side, 55), cv2.FONT_HERSHEY_SIMPLEX, 
-                       0.45, (200, 200, 200), 1)
-            cv2.putText(graph_frame, f"Dev: {max_deviation*10:.1f}mm", 
-                       (margin_side, 75), cv2.FONT_HERSHEY_SIMPLEX, 
-                       0.45, (200, 200, 200), 1)
+            # Z축 기준과 편차 정보
+            if z_reference is not None and z_values_cm:
+                max_z_diff = max([abs(z - z_reference) for z in z_values_cm])
+                cv2.putText(graph_frame, f"Z-ref: {z_reference:.2f}cm", 
+                           (margin_side, 55), cv2.FONT_HERSHEY_SIMPLEX, 
+                           0.45, (200, 200, 200), 1)
+                cv2.putText(graph_frame, f"Max Z-diff: {max_z_diff*10:.1f}mm", 
+                           (margin_side, 75), cv2.FONT_HERSHEY_SIMPLEX, 
+                           0.45, (200, 200, 200), 1)
+            else:
+                # Z값이 없으면 평균 기준
+                max_diff = max_distance - avg_distance
+                min_diff = min_distance - avg_distance
+                max_deviation = max(abs(max_diff), abs(min_diff))
+                cv2.putText(graph_frame, f"Avg: {avg_distance:.2f}cm", 
+                           (margin_side, 55), cv2.FONT_HERSHEY_SIMPLEX, 
+                           0.45, (200, 200, 200), 1)
+                cv2.putText(graph_frame, f"Dev: {max_deviation*10:.1f}mm", 
+                           (margin_side, 75), cv2.FONT_HERSHEY_SIMPLEX, 
+                           0.45, (200, 200, 200), 1)
             
             # 막대 영역
             bar_height = graph_area_height // 5
@@ -300,12 +316,18 @@ def draw_realtime_bar_graph(frame, distances_cm, point_names, colors, position='
                 if distance is not None and distance > 0:
                     y_pos = margin_top + i * (bar_height + bar_spacing)
                     
-                    # 평균 대비 차이 계산
-                    diff_from_avg = distance - avg_distance
-                    diff_mm = diff_from_avg * 10
+                    # Z축 기준 차이 계산
+                    if z_reference is not None and z_values_cm and i < len(z_values_cm):
+                        # Z축 평균 대비 현재 점의 Z값 차이
+                        z_diff = z_values_cm[i] - z_reference  # cm 단위
+                        z_diff_mm = z_diff * 10  # mm 단위
+                    else:
+                        # Z값이 없으면 평균 거리 대비 차이
+                        z_diff = distance - avg_distance
+                        z_diff_mm = z_diff * 10
                     
-                    # 정렬 여부
-                    is_aligned = abs(diff_mm) <= 1.0
+                    # 정렬 여부 (1mm 이내)
+                    is_aligned = abs(z_diff_mm) <= 1.0
                     border_color = (0, 255, 0) if is_aligned else (255, 255, 255)
                     
                     # 막대 폭 계산 (정규화)
@@ -338,14 +360,16 @@ def draw_realtime_bar_graph(frame, distances_cm, point_names, colors, position='
                                (x_start + 5, y_pos + bar_height // 2 + 5),
                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
                     
-                    # 조정 가이드 (아래)
-                    if abs(diff_mm) > 0.1:
-                        if diff_mm > 0:
-                            guide_text = f"↓{abs(diff_mm):.1f}mm"
-                            guide_color = (0, 200, 255)
+                    # Z축 기준 조정 가이드 (막대 오른쪽)
+                    if abs(z_diff_mm) > 0.1:
+                        # +는 기준보다 높음 (올라가 있음) -> 내려야 함
+                        # -는 기준보다 낮음 (내려가 있음) -> 올려야 함
+                        if z_diff > 0:
+                            guide_text = f"+{z_diff_mm:.2f}mm"
+                            guide_color = (100, 200, 255)  # 주황색
                         else:
-                            guide_text = f"↑{abs(diff_mm):.1f}mm"
-                            guide_color = (0, 255, 255)
+                            guide_text = f"{z_diff_mm:.2f}mm"
+                            guide_color = (100, 255, 255)  # 노란색
                         
                         cv2.putText(graph_frame, guide_text,
                                    (x_start + bar_width_val + 5, y_pos + bar_height // 2 + 5),
@@ -848,14 +872,13 @@ def main():
     print("  5. 's' 키를 눌러 측정 데이터를 CSV 파일로 저장")
     print("\n오른쪽 막대그래프 기능:")
     print("  - 고정 스케일: 평균값 ±20% 범위로 실제 차이를 정확히 표시")
-    print("  - 평균 기준선: 녹색 점선 (세로선)")
-    print("  - 조정 가이드: 각 점의 ↑UP/↓DOWN 방향과 조정량(mm) 표시")
+    print("  - Z-ref: 3점의 평균 Z축 높이 (기준면)")
+    print("  - Z축 기준 차이: +값(기준보다 높음), -값(기준보다 낮음)")
+    print("    예) Z-ref: 3.20cm일 때")
+    print("        P1: 3.47cm → +0.27cm (2.7mm 높음)")
+    print("        P2: 3.00cm → -0.20cm (2.0mm 낮음)")
     print("  - 정렬 완료: 막대 테두리가 녹색으로 변경 + 'OK' 표시")
-    print("  - Avg: 3점의 평균 거리 / Dev: 최대 편차")
-    print("\n정렬 측정 항목:")
-    print("  - Z-axis range: 3점의 Z축 편차 (1mm 이하면 녹색)")
-    print("  - Collinearity: 3점의 일직선 정도 (0.05 이하면 녹색)")
-    print("  - Status: ALIGNED (녹색 체크) 또는 NOT ALIGNED (빨간색 X)")
+    print("  - Max Z-diff: 기준면 대비 최대 높이 차이 (1mm 이하 목표)")
     print("\n단축키:")
     print("  'm' - 측정 시작/중지 (기본: 자동 시작)")
     print("  's' - 측정 데이터를 CSV 파일로 저장 (중요!)")
@@ -866,10 +889,12 @@ def main():
     print("  'q' - 종료 (자동으로 데이터 저장)")
     print("="*70)
     print("\n💡 평형 조정 방법:")
-    print("  1. 오른쪽 막대그래프에서 '↑UP' 또는 '↓DOWN' 가이드 확인")
+    print("  1. 오른쪽 막대그래프에서 Z축 기준 차이 확인")
+    print("     +0.27mm → 기준보다 2.7mm 높음 (내려야 함)")
+    print("     -0.20mm → 기준보다 2.0mm 낮음 (올려야 함)")
     print("  2. 표시된 mm 값만큼 모터 위치 조정")
     print("  3. 막대 테두리가 녹색으로 변하고 'OK'가 표시되면 완료!")
-    print("  4. 'Dev' (최대 편차)가 1.0mm 이하가 되도록 조정하세요")
+    print("  4. 'Max Z-diff'가 1.0mm 이하가 되도록 조정하세요")
     print("="*70 + "\n")
     
     # EMA 필터 (부드러운 출력)
@@ -1014,58 +1039,7 @@ def main():
                 distances_cm = [d * 100 for d in ema_distances]  # m → cm
                 update_graph_data(distances_cm)
         
-        # 정렬 상태 측정 및 표시
-        if len(points_3d) == 3:
-            alignment = calculate_alignment_metrics(points_3d)
-            if alignment is not None:
-                # 정렬 상태 표시 영역 (오른쪽 상단)
-                align_x = w_img - 480
-                align_y = 120
-                
-                # 배경 박스
-                cv2.rectangle(frame, (align_x - 10, align_y - 30), 
-                             (w_img - 10, align_y + 160), (0, 0, 0), -1)
-                cv2.rectangle(frame, (align_x - 10, align_y - 30), 
-                             (w_img - 10, align_y + 160), (255, 255, 255), 2)
-                
-                # 제목
-                cv2.putText(frame, "=== ALIGNMENT STATUS ===", 
-                           (align_x, align_y), FONT, 0.7, (255, 255, 255), 2)
-                
-                # Z축 편차
-                z_range_mm = alignment['z_range'] * 1000  # m → mm
-                z_color = (0, 255, 0) if z_range_mm < 1.0 else (0, 165, 255) if z_range_mm < 2.0 else (0, 0, 255)
-                cv2.putText(frame, f"Z-axis range: {z_range_mm:.2f}mm", 
-                           (align_x, align_y + 35), FONT, 0.6, z_color, 2)
-                
-                # 공선성
-                col_norm = alignment['collinearity_normalized']
-                col_color = (0, 255, 0) if col_norm < 0.05 else (0, 165, 255) if col_norm < 0.1 else (0, 0, 255)
-                cv2.putText(frame, f"Collinearity: {col_norm:.4f}", 
-                           (align_x, align_y + 70), FONT, 0.6, col_color, 2)
-                
-                # 정렬 상태
-                if alignment['is_aligned']:
-                    status_text = "ALIGNED!"
-                    status_color = (0, 255, 0)
-                    # 체크 마크
-                    cv2.circle(frame, (w_img - 50, align_y + 115), 20, (0, 255, 0), 3)
-                    cv2.line(frame, (w_img - 58, align_y + 115), (w_img - 50, align_y + 123), (0, 255, 0), 3)
-                    cv2.line(frame, (w_img - 50, align_y + 123), (w_img - 38, align_y + 105), (0, 255, 0), 3)
-                else:
-                    status_text = "NOT ALIGNED"
-                    status_color = (0, 0, 255)
-                    # X 마크
-                    cv2.line(frame, (w_img - 65, align_y + 100), (w_img - 35, align_y + 130), (0, 0, 255), 3)
-                    cv2.line(frame, (w_img - 35, align_y + 100), (w_img - 65, align_y + 130), (0, 0, 255), 3)
-                
-                cv2.putText(frame, status_text, 
-                           (align_x, align_y + 120), FONT, 0.8, status_color, 2)
-                
-                # 가이드 메시지
-                if not alignment['is_aligned']:
-                    cv2.putText(frame, "Adjust motor positions", 
-                               (align_x, align_y + 150), FONT, 0.5, (255, 200, 0), 1)
+        # 정렬 상태 측정 (검은 박스 제거, 오른쪽 그래프에만 표시)
         
         # 1초마다 측정 기록
         if measurement_active and tracking_active and len(current_measurements) == 3:
@@ -1097,7 +1071,10 @@ def main():
         if show_bar_graph and tracking_active and len(ema_distances) == 3:
             if all(d is not None for d in ema_distances):
                 distances_cm = [d * 100 for d in ema_distances]  # m → cm
-                frame = draw_realtime_bar_graph(frame, distances_cm, point_names, colors, position=bar_graph_position)
+                # Z값 추출 (points_3d에서)
+                z_values_cm = [p[2] * 100 for p in points_3d] if len(points_3d) == 3 else None
+                frame = draw_realtime_bar_graph(frame, distances_cm, point_names, colors, 
+                                              position=bar_graph_position, z_values_cm=z_values_cm)
         
         # 화면 표시
         cv2.imshow(window_name, frame)
