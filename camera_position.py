@@ -30,6 +30,7 @@ point_names = ['Point 1', 'Point 2', 'Point 3']
 tracked_points = []  # 추적 중인 점들 (실시간 업데이트)
 
 tracking_active = False
+freeze_points = False  # 점 위치 고정 모드 (True = 고정, False = 추적)
 
 # 측정 관련 변수
 measurement_active = False
@@ -736,7 +737,7 @@ def save_measurement_log():
 
 def main():
     global FIXED_Z_DISTANCE, focal_length
-    global selected_points, tracked_points, tracking_active
+    global selected_points, tracked_points, tracking_active, freeze_points
     global measurement_active, last_measurement_time, measurement_log, show_bar_graph, bar_graph_position
     
     # Z축 거리 설정
@@ -867,9 +868,10 @@ def main():
     print("\n사용법:")
     print("  1. 마우스로 3점을 클릭하여 선택")
     print("  2. 자동으로 실시간 추적 및 측정 시작 (1초마다 자동 기록)")
-    print("  3. 오른쪽 막대그래프에서 평형 조정 가이드를 확인하세요")
-    print("  4. 화면 오른쪽 상단에서 3점의 정렬 상태를 확인할 수 있습니다")
-    print("  5. 's' 키를 눌러 측정 데이터를 CSV 파일로 저장")
+    print("  3. 점이 흔들리면 'F' 키를 눌러 점 위치 고정! ⭐")
+    print("  4. 오른쪽 막대그래프에서 평형 조정 가이드를 확인하세요")
+    print("  5. 화면 오른쪽 상단에서 3점의 정렬 상태를 확인할 수 있습니다")
+    print("  6. 's' 키를 눌러 측정 데이터를 CSV 파일로 저장")
     print("\n오른쪽 막대그래프 기능:")
     print("  - 고정 스케일: 평균값 ±20% 범위로 실제 차이를 정확히 표시")
     print("  - Z-ref: 3점의 평균 Z축 높이 (기준면)")
@@ -880,6 +882,7 @@ def main():
     print("  - 정렬 완료: 막대 테두리가 녹색으로 변경 + 'OK' 표시")
     print("  - Max Z-diff: 기준면 대비 최대 높이 차이 (1mm 이하 목표)")
     print("\n단축키:")
+    print("  'f' - 점 위치 고정/해제 (흔들림 제거!) ⭐")
     print("  'm' - 측정 시작/중지 (기본: 자동 시작)")
     print("  's' - 측정 데이터를 CSV 파일로 저장 (중요!)")
     print("  'b' - 실시간 막대그래프 ON/OFF (기본: ON)")
@@ -933,11 +936,14 @@ def main():
         h_img, w_img = frame.shape[:2]
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
-        # 점 추적 (Optical Flow)
-        if tracking_active and prev_gray is not None:
+        # 점 추적 (Optical Flow) - freeze_points가 False일 때만
+        if tracking_active and prev_gray is not None and not freeze_points:
             new_points = track_points_optical_flow(prev_gray, gray, tracked_points)
             if new_points is not None:
                 tracked_points = new_points
+        elif tracking_active and freeze_points:
+            # 고정 모드: 초기 선택한 위치 유지
+            tracked_points = selected_points.copy()
         
         prev_gray = gray.copy()
         
@@ -952,8 +958,16 @@ def main():
             cv2.putText(frame, f"Z-axis distance: {FIXED_Z_DISTANCE*100:.1f}cm (fixed)", 
                        (20, 60), FONT, 0.6, (255, 255, 255), 2)
         else:
-            cv2.putText(frame, "Tracking active - Move camera left/right", 
-                       (20, 30), FONT, 0.7, (0, 255, 0), 2)
+            # 추적 모드에 따라 메시지 변경
+            if freeze_points:
+                tracking_msg = "Points FROZEN (Press 'F' to unfreeze)"
+                tracking_color = (0, 255, 255)  # 노란색
+            else:
+                tracking_msg = "Tracking active - Move camera left/right"
+                tracking_color = (0, 255, 0)  # 녹색
+            
+            cv2.putText(frame, tracking_msg, 
+                       (20, 30), FONT, 0.7, tracking_color, 2)
             cv2.putText(frame, f"Z-axis: {FIXED_Z_DISTANCE*100:.1f}cm (fixed)", 
                        (20, 60), FONT, 0.6, (255, 255, 255), 2)
             
@@ -1123,6 +1137,7 @@ def main():
             tracked_points = []
             tracking_active = False
             measurement_active = False
+            freeze_points = False
             ema_distances = [None, None, None]
             prev_gray = None
             print("\n" + "="*70)
@@ -1137,6 +1152,25 @@ def main():
                 print(f"[INFO] Z축 거리 변경: {FIXED_Z_DISTANCE*100:.1f}cm")
                 # 거리 재계산을 위해 EMA 초기화
                 ema_distances = [None, None, None]
+        elif key == ord('f') or key == ord('F'):
+            # 점 고정/고정해제 토글
+            if tracking_active:
+                freeze_points = not freeze_points
+                if freeze_points:
+                    # 고정 모드로 전환: 현재 추적 위치를 초기 위치로 저장
+                    selected_points = tracked_points.copy()
+                    print("\n" + "="*70)
+                    print("[INFO] 📌 점 위치 고정 ON")
+                    print("      점들이 현재 위치에 고정됩니다 (흔들림 없음)")
+                    print("      'F' 키를 다시 누르면 추적 모드로 전환됩니다")
+                    print("="*70)
+                else:
+                    print("\n" + "="*70)
+                    print("[INFO] 🔓 점 위치 고정 OFF")
+                    print("      Optical Flow로 점 추적을 재개합니다")
+                    print("="*70)
+            else:
+                print("[WARNING] 먼저 3점을 선택해주세요!")
     
     # 리소스 정리
     if picam is not None:
