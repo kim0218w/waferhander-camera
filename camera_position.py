@@ -30,7 +30,8 @@ point_names = ['Point 1', 'Point 2', 'Point 3']
 tracked_points = []  # 추적 중인 점들 (실시간 업데이트)
 
 tracking_active = False
-freeze_points = False  # 점 위치 고정 모드 (True = 고정, False = 추적)
+freeze_points = False  # 점 위치 고정 모드 (True = 1초마다 업데이트, False = 실시간 추적)
+last_freeze_update_time = 0  # 마지막 고정 모드 업데이트 시간
 
 # 측정 관련 변수
 measurement_active = False
@@ -737,7 +738,7 @@ def save_measurement_log():
 
 def main():
     global FIXED_Z_DISTANCE, focal_length
-    global selected_points, tracked_points, tracking_active, freeze_points
+    global selected_points, tracked_points, tracking_active, freeze_points, last_freeze_update_time
     global measurement_active, last_measurement_time, measurement_log, show_bar_graph, bar_graph_position
     
     # Z축 거리 설정
@@ -868,7 +869,8 @@ def main():
     print("\n사용법:")
     print("  1. 마우스로 3점을 클릭하여 선택")
     print("  2. 자동으로 실시간 추적 및 측정 시작 (1초마다 자동 기록)")
-    print("  3. 점이 흔들리면 'F' 키를 눌러 점 위치 고정! ⭐")
+    print("  3. 점이 흔들리면 'F' 키를 눌러 안정화 모드! ⭐")
+    print("     (1초마다 점 위치를 업데이트하여 흔들림 없이 높이 변화 반영)")
     print("  4. 오른쪽 막대그래프에서 평형 조정 가이드를 확인하세요")
     print("  5. 화면 오른쪽 상단에서 3점의 정렬 상태를 확인할 수 있습니다")
     print("  6. 's' 키를 눌러 측정 데이터를 CSV 파일로 저장")
@@ -882,7 +884,7 @@ def main():
     print("  - 정렬 완료: 막대 테두리가 녹색으로 변경 + 'OK' 표시")
     print("  - Max Z-diff: 기준면 대비 최대 높이 차이 (1mm 이하 목표)")
     print("\n단축키:")
-    print("  'f' - 점 위치 고정/해제 (흔들림 제거!) ⭐")
+    print("  'f' - 점 위치 안정화 ON/OFF (1초마다 업데이트, 흔들림 제거!) ⭐")
     print("  'm' - 측정 시작/중지 (기본: 자동 시작)")
     print("  's' - 측정 데이터를 CSV 파일로 저장 (중요!)")
     print("  'b' - 실시간 막대그래프 ON/OFF (기본: ON)")
@@ -936,19 +938,28 @@ def main():
         h_img, w_img = frame.shape[:2]
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
-        # 점 추적 (Optical Flow) - freeze_points가 False일 때만
-        if tracking_active and prev_gray is not None and not freeze_points:
-            new_points = track_points_optical_flow(prev_gray, gray, tracked_points)
-            if new_points is not None:
-                tracked_points = new_points
-        elif tracking_active and freeze_points:
-            # 고정 모드: 초기 선택한 위치 유지
-            tracked_points = selected_points.copy()
-        
-        prev_gray = gray.copy()
-        
         # 현재 시간
         current_time = time.time()
+        
+        # 점 추적 (Optical Flow)
+        if tracking_active and prev_gray is not None:
+            if not freeze_points:
+                # 실시간 추적 모드: 매 프레임마다 업데이트
+                new_points = track_points_optical_flow(prev_gray, gray, tracked_points)
+                if new_points is not None:
+                    tracked_points = new_points
+            else:
+                # 고정 모드: 1초마다 위치 업데이트
+                if current_time - last_freeze_update_time >= 1.0:
+                    # 1초가 지났으면 Optical Flow로 새 위치 찾기
+                    new_points = track_points_optical_flow(prev_gray, gray, tracked_points)
+                    if new_points is not None:
+                        tracked_points = new_points
+                        selected_points = tracked_points.copy()  # 새 위치를 고정
+                        last_freeze_update_time = current_time
+                # 1초가 지나지 않았으면 이전에 고정된 위치 유지 (tracked_points 그대로)
+        
+        prev_gray = gray.copy()
         
         # 상태 표시
         if not tracking_active:
@@ -960,7 +971,9 @@ def main():
         else:
             # 추적 모드에 따라 메시지 변경
             if freeze_points:
-                tracking_msg = "Points FROZEN (Press 'F' to unfreeze)"
+                # 다음 업데이트까지 남은 시간 계산
+                time_until_update = max(0, 1.0 - (current_time - last_freeze_update_time))
+                tracking_msg = f"STABILIZED - Updates every 1 sec (Next: {time_until_update:.1f}s)"
                 tracking_color = (0, 255, 255)  # 노란색
             else:
                 tracking_msg = "Tracking active - Move camera left/right"
@@ -992,10 +1005,19 @@ def main():
             cv2.putText(frame, f"[Bar Graph: {bar_status}]", 
                        (20, 150), FONT, 0.5, bar_color, 1)
             
+            # 안정화 모드 상태 표시
+            if freeze_points:
+                stabilize_text = "[Stabilized Mode: ON - 1sec updates]"
+                cv2.putText(frame, stabilize_text, 
+                           (20, 175), FONT, 0.5, (0, 255, 255), 2)
+                # 깜박이는 인디케이터
+                if int(current_time * 2) % 2 == 0:
+                    cv2.circle(frame, (w_img - 80, 100), 8, (0, 255, 255), -1)
+            
             # 선 그래프 상태 표시
             if graph_enabled:
                 cv2.putText(frame, "[Line Graph: ON]", 
-                           (20, 175), FONT, 0.5, (0, 255, 255), 1)
+                           (20, 200), FONT, 0.5, (0, 255, 255), 1)
         
         # 선택된/추적 중인 점들 표시 및 거리 계산
         colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255)]
@@ -1008,9 +1030,16 @@ def main():
             point = tracked_points[i]
             color = colors[i]
             
-            # 점 표시
-            cv2.circle(frame, (int(point[0]), int(point[1])), 10, color, -1)
-            cv2.circle(frame, (int(point[0]), int(point[1])), 15, color, 2)
+            # 점 표시 (안정화 모드에서 업데이트 직후에는 깜박임 효과)
+            if freeze_points and (current_time - last_freeze_update_time) < 0.2:
+                # 업데이트 직후 0.2초간 밝게 표시
+                cv2.circle(frame, (int(point[0]), int(point[1])), 15, (255, 255, 255), -1)
+                cv2.circle(frame, (int(point[0]), int(point[1])), 20, (255, 255, 255), 3)
+            else:
+                # 일반 표시
+                cv2.circle(frame, (int(point[0]), int(point[1])), 10, color, -1)
+                cv2.circle(frame, (int(point[0]), int(point[1])), 15, color, 2)
+            
             cv2.putText(frame, point_names[i], 
                        (int(point[0]) + 20, int(point[1]) - 15), 
                        FONT, 0.6, color, 2)
@@ -1138,6 +1167,7 @@ def main():
             tracking_active = False
             measurement_active = False
             freeze_points = False
+            last_freeze_update_time = 0
             ema_distances = [None, None, None]
             prev_gray = None
             print("\n" + "="*70)
@@ -1153,21 +1183,23 @@ def main():
                 # 거리 재계산을 위해 EMA 초기화
                 ema_distances = [None, None, None]
         elif key == ord('f') or key == ord('F'):
-            # 점 고정/고정해제 토글
+            # 점 안정화 모드 토글
             if tracking_active:
                 freeze_points = not freeze_points
                 if freeze_points:
-                    # 고정 모드로 전환: 현재 추적 위치를 초기 위치로 저장
+                    # 안정화 모드로 전환: 1초마다 업데이트
                     selected_points = tracked_points.copy()
+                    last_freeze_update_time = current_time
                     print("\n" + "="*70)
-                    print("[INFO] 📌 점 위치 고정 ON")
-                    print("      점들이 현재 위치에 고정됩니다 (흔들림 없음)")
-                    print("      'F' 키를 다시 누르면 추적 모드로 전환됩니다")
+                    print("[INFO] 📌 점 위치 안정화 ON")
+                    print("      1초마다 점 위치를 업데이트합니다 (흔들림 없음)")
+                    print("      실시간 추적보다 안정적이며, 높이 변화는 반영됩니다")
+                    print("      'F' 키를 다시 누르면 실시간 추적 모드로 전환됩니다")
                     print("="*70)
                 else:
                     print("\n" + "="*70)
-                    print("[INFO] 🔓 점 위치 고정 OFF")
-                    print("      Optical Flow로 점 추적을 재개합니다")
+                    print("[INFO] 🔓 점 위치 안정화 OFF")
+                    print("      실시간 Optical Flow 추적을 재개합니다")
                     print("="*70)
             else:
                 print("[WARNING] 먼저 3점을 선택해주세요!")
